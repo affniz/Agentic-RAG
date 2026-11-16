@@ -93,7 +93,7 @@ def main() -> None:
                 print(f"\nAnswers ({model}, effort={args.effort}):")
                 s = answer_eval(kb, questions, model=model, effort=args.effort)
                 print(f"\n  correct={s['correct']:.0%}  partial={s['partially_correct']:.0%}  "
-                      f"cited expected sources={s['cited_expected_sources']:.0%}")
+                      f"cited expected sources={'n/a' if s['cited_expected_sources'] is None else format(s['cited_expected_sources'], '.0%')}")
                 print(f"  avg tool calls={s['avg_tool_calls']:.1f}  avg time={s['avg_seconds']:.1f}s")
                 print(f"  cost: agent ${s['agent_cost_usd'] or 0:.3f} + judge ${s['judge_cost_usd'] or 0:.3f}")
                 print(f"  details: {s['results_file']}")

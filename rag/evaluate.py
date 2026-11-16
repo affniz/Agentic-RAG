@@ -123,7 +123,9 @@ def answer_eval(
 
         verdict, ju = judge(client, q, ans.text)
         judge_usage.add(ju)
-        cited = all(re.search(rf"\[{re.escape(s)}#\d+\]", ans.text) for s in q.get("sources", []))
+        sources = q.get("sources", [])
+        # None when the question expects no sources (e.g. unanswerable) - nothing to check.
+        cited = all(re.search(rf"\[{re.escape(s)}#\d+\]", ans.text) for s in sources) if sources else None
         rows.append(
             {
                 "id": q["id"],
@@ -139,17 +141,18 @@ def answer_eval(
                 "stop": ans.stop,
             }
         )
-        log(f"[{i}/{len(questions)}] {q['id']}: {verdict.verdict}  cited={cited}  "
+        log(f"[{i}/{len(questions)}] {q['id']}: {verdict.verdict}  cited={'n/a' if cited is None else cited}  "
             f"tools={len(ans.tool_calls)}  ${ans.cost_usd or 0:.4f}  {elapsed:.1f}s")
 
     n = len(rows) or 1
+    with_src = [r for r in rows if r["cited_expected_sources"] is not None]
     summary = {
         "model": model,
         "effort": effort,
         "questions": len(rows),
         "correct": sum(r["verdict"] == "correct" for r in rows) / n,
         "partially_correct": sum(r["verdict"] == "partially_correct" for r in rows) / n,
-        "cited_expected_sources": sum(r["cited_expected_sources"] for r in rows) / n,
+        "cited_expected_sources": (sum(bool(r["cited_expected_sources"]) for r in with_src) / len(with_src)) if with_src else None,
         "avg_tool_calls": sum(r["tool_calls"] for r in rows) / n,
         "avg_seconds": sum(r["seconds"] for r in rows) / n,
         "agent_cost_usd": agent_usage.cost(model),
