@@ -121,7 +121,7 @@ see `Chunk.render()`. That took date-dependent questions from 83% to 100% for *b
 citations, but not accuracy (86% for both).
 
 Answers are graded by a `claude-haiku-5-5` judge against reference answers (`--judge-model` to change),
-and results are saved to `evals/results/`. Other flags: `--category multi_hop`, `--limit N`, `--workers N`.
+and results are saved to `evals/results/`. Other flags: `--category multi_hop`, `--limit N`, `--workers N`, and `--repeats N` - run everything N times and report the mean, the min-max range across runs and the questions whose verdict changed. On these sets one run flips about one answer, so use `--repeats 3` before trusting a difference of a question or two.
 
 Rough cost for the hard set (estimates): Haiku, both systems ≈ $0.15; Sonnet, both systems ≈ $1-2.
 

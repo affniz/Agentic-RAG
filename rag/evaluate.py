@@ -176,12 +176,19 @@ def answer_eval(
     label: str = "",
     log: Callable[[str], None] = print,
     client: Any = None,
+    repeats: int = 1,
 ) -> dict[str, Any]:
-    client = client or anthropic.Anthropic()
-    jobs = [(q, s) for q in questions for s in systems]
+    """Answer and grade every question with every system, `repeats` times.
 
-    def run(job: tuple[dict[str, Any], str]) -> dict[str, Any]:
-        q, sysname = job
+    With repeats > 1 each system's summary holds the mean over runs, the min-max range of the
+    accuracy metrics, and `unstable`: questions whose verdict changed between runs.
+    """
+    client = client or anthropic.Anthropic()
+    repeats = max(1, repeats)
+    jobs = [(q, s, r) for r in range(repeats) for q in questions for s in systems]
+
+    def run(job: tuple[dict[str, Any], str, int]) -> dict[str, Any]:
+        q, sysname, rep = job
         system = make_system(sysname, kb, client, model, effort, today, naive_k)  # fresh, no history
         start = time.time()
         ans: Answer = system.ask(q["question"])
@@ -193,6 +200,7 @@ def answer_eval(
             "id": q["id"],
             "category": q.get("category", "uncategorized"),
             "system": sysname,
+            "run": rep + 1,
             "question": q["question"],
             "answer": ans.text,
             "verdict": verdict.verdict,
@@ -214,19 +222,47 @@ def answer_eval(
         for i, row in enumerate(pool.map(run, jobs), 1):
             rows.append(row)
             ev = "" if row["evidence_recall"] is None else f"  evidence={row['evidence_recall']:.0%}"
-            log(f"[{i}/{len(jobs)}] {row['system']:<8} {row['id']:<26} {row['verdict']:<17}"
+            run_tag = f" run {row['run']}" if repeats > 1 else ""
+            log(f"[{i}/{len(jobs)}]{run_tag} {row['system']:<10} {row['id']:<26} {row['verdict']:<17}"
                 f"tools={row['tool_calls']}{ev}  ${row['cost_usd']:.4f}  {row['seconds']}s")
 
     summary = {"model": model, "effort": effort, "questions": len(questions), "naive_k": naive_k,
-               "judge_model": judge_model, "systems": {s: summarize([r for r in rows if r["system"] == s])
-                                                       for s in systems}}
+               "judge_model": judge_model, "repeats": repeats,
+               "systems": {s: combine_runs([r for r in rows if r["system"] == s], repeats) for s in systems}}
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    path = out / f"{stamp}-{label + '-' if label else ''}{model}-{'-'.join(systems)}.json"
+    reps = f"-x{repeats}" if repeats > 1 else ""
+    path = out / f"{stamp}-{label + '-' if label else ''}{model}-{'-'.join(systems)}{reps}.json"
     path.write_text(json.dumps({"summary": summary, "rows": rows}, indent=2, ensure_ascii=False))
     summary["results_file"] = str(path)
     return summary
+
+
+RANGED = ("correct", "partially_correct", "evidence_recall", "cited_expected_sources")
+
+
+def combine_runs(rows: list[dict[str, Any]], repeats: int) -> dict[str, Any]:
+    """One system's results: per-run summaries averaged, with min-max ranges and unstable questions."""
+    runs = [summarize([r for r in rows if r.get("run", 1) == k]) for k in range(1, repeats + 1)]
+    out = summarize(rows)  # pooled over all runs = the mean of equal-sized runs
+    out["cost_usd"] = sum(r["cost_usd"] for r in runs) / len(runs)  # per run, comparable to repeats=1
+    out["judge_cost_usd"] = sum(r["judge_cost_usd"] for r in runs) / len(runs)
+    out["runs"] = repeats
+    out["range"] = {}
+    for key in RANGED:
+        vals = [r[key] for r in runs if r[key] is not None]
+        if vals:
+            out["range"][key] = (min(vals), max(vals))
+    for cat, stats in out["by_category"].items():
+        vals = [r["by_category"][cat]["correct"] for r in runs if cat in r["by_category"]]
+        stats["range"] = (min(vals), max(vals))
+        stats["n"] //= repeats  # questions in the category, not answers pooled over runs
+    verdicts: dict[str, set[str]] = defaultdict(set)
+    for r in rows:
+        verdicts[r["id"]].add(r["verdict"])
+    out["unstable"] = sorted(qid for qid, v in verdicts.items() if len(v) > 1)
+    return out
 
 
 def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:

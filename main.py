@@ -65,6 +65,7 @@ def main() -> None:
     s.add_argument("--workers", type=int, default=4, help="questions answered in parallel")
     s.add_argument("--category", default=None, help="only questions in this category")
     s.add_argument("--limit", type=int, default=None, help="only the first N questions")
+    s.add_argument("--repeats", type=int, default=1, help="run everything N times; report mean, range, unstable questions")
 
     args = p.parse_args()
     kb = KnowledgeBase(args.index, rerank=not args.no_rerank)
@@ -145,24 +146,41 @@ def run_eval(args: argparse.Namespace, model: str) -> None:
     print(f"\nAnswers ({model}, effort={args.effort}, systems={','.join(systems)}):")
     s = answer_eval(kb, questions, model=model, effort=args.effort, systems=systems, today=es.today,
                     naive_k=args.naive_k, judge_model=args.judge_model or JUDGE_MODEL,
-                    workers=args.workers, label=es.name)
+                    workers=args.workers, label=es.name, repeats=args.repeats)
 
     res = s["systems"]
     pct = lambda v: "n/a" if v is None else f"{v:.0%}"
-    head = "".join(f"{(name if name != 'naive' else f'naive (k={args.naive_k})'):>16}" for name in systems)
+
+    def ranged(stats: dict, key: str) -> str:
+        """'95%', or '95% (93-98)' when repeated runs disagree."""
+        v, rng = stats.get(key), stats.get("range")
+        if isinstance(rng, dict):
+            rng = rng.get(key)
+        if v is None or not rng or rng[0] == rng[1]:
+            return pct(v)
+        return f"{v:.0%} ({rng[0] * 100:.0f}-{rng[1] * 100:.0f})"
+    w = 22 if s["repeats"] > 1 else 16
+    head = "".join(f"{(name if name != 'naive' else f'naive (k={args.naive_k})'):>{w}}" for name in systems)
     print(f"\n{'':<28}{head}")
-    print(f"{'correct':<28}" + "".join(f"{pct(res[n]['correct']):>16}" for n in systems))
+    if s["repeats"] > 1:
+        print(f"{'(mean over ' + str(s['repeats']) + ' runs, range)':<28}")
+    print(f"{'correct':<28}" + "".join(f"{ranged(res[n], 'correct'):>{w}}" for n in systems))
     cats = sorted({c for n in systems for c in res[n]['by_category']})
     for c in cats:
         cnt = next(res[n]['by_category'][c]['n'] for n in systems if c in res[n]['by_category'])
         print(f"{'  ' + c + f' ({cnt})':<28}" + "".join(
-            f"{pct(res[n]['by_category'].get(c, {}).get('correct')):>16}" for n in systems))
-    print(f"{'partially correct':<28}" + "".join(f"{pct(res[n]['partially_correct']):>16}" for n in systems))
-    print(f"{'evidence retrieved':<28}" + "".join(f"{pct(res[n]['evidence_recall']):>16}" for n in systems))
-    print(f"{'cited expected sources':<28}" + "".join(f"{pct(res[n]['cited_expected_sources']):>16}" for n in systems))
-    print(f"{'avg API calls':<28}" + "".join(f"{res[n]['avg_api_calls']:>16.1f}" for n in systems))
-    print(f"{'avg seconds':<28}" + "".join(f"{res[n]['avg_seconds']:>16.1f}" for n in systems))
-    print(f"{'cost (USD)':<28}" + "".join(f"{'$' + format(res[n]['cost_usd'], '.3f'):>16}" for n in systems))
+            f"{ranged(res[n]['by_category'].get(c, {}), 'correct'):>{w}}" for n in systems))
+    print(f"{'partially correct':<28}" + "".join(f"{ranged(res[n], 'partially_correct'):>{w}}" for n in systems))
+    print(f"{'evidence retrieved':<28}" + "".join(f"{ranged(res[n], 'evidence_recall'):>{w}}" for n in systems))
+    print(f"{'cited expected sources':<28}" + "".join(f"{ranged(res[n], 'cited_expected_sources'):>{w}}" for n in systems))
+    print(f"{'avg API calls':<28}" + "".join(f"{res[n]['avg_api_calls']:>{w}.1f}" for n in systems))
+    print(f"{'avg seconds':<28}" + "".join(f"{res[n]['avg_seconds']:>{w}.1f}" for n in systems))
+    cost_label = "cost per run (USD)" if s["repeats"] > 1 else "cost (USD)"
+    print(f"{cost_label:<28}" + "".join(f"{'$' + format(res[n]['cost_usd'], '.3f'):>{w}}" for n in systems))
+    if s["repeats"] > 1:
+        for n in systems:
+            unstable = res[n]["unstable"]
+            print(f"\nunstable for {n} (verdict changed between runs): {', '.join(unstable) if unstable else 'none'}")
     judge_cost = sum(res[n]["judge_cost_usd"] for n in systems)
     print(f"\njudge ({s['judge_model']}) cost ${judge_cost:.3f}. Details: {s['results_file']}")
 

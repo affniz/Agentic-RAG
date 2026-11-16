@@ -99,3 +99,26 @@ def test_evidence_recall_counts_document_notes(tmp_path):
     kb.ingest(d)
     # Only the Hotels chunk was retrieved, but its note shows the validity window.
     assert _evidence_recall(kb, ["p.md#1"], ["In force until 2026-02-28", "Tier 1: $320"]) == 1.0
+
+
+def test_repeats_report_mean_range_and_unstable(kb, tmp_path):
+    import itertools
+
+    flips = itertools.cycle(["correct", "correct", "incorrect", "correct"])
+
+    class FlakyJudge(FakeAnthropic):
+        def _parse(self, **kw):
+            return NS(parsed_output=Verdict(reasoning="-", verdict=next(flips)), stop_reason="end_turn",
+                      usage=usage(10, 5))
+
+    qs = [{"id": i, "category": "c", "question": "Bangalore tier office", "evidence": [], "sources": [],
+           "reference": "x"} for i in ("q1", "q2")]
+    s = answer_eval(kb, qs, model="claude-haiku-5-5", systems=("agentic",), repeats=2, workers=1,
+                    out_dir=tmp_path, client=FlakyJudge(), log=lambda _: None)
+    r = s["systems"]["agentic"]
+    # Run 1: q1 correct, q2 correct. Run 2: q1 incorrect, q2 correct.
+    assert r["runs"] == 2 and r["correct"] == 0.75
+    assert r["range"]["correct"] == (0.5, 1.0)
+    assert r["by_category"]["c"]["range"] == (0.5, 1.0)
+    assert r["by_category"]["c"]["n"] == 2
+    assert r["unstable"] == ["q1"]
