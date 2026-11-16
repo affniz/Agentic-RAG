@@ -5,3 +5,4 @@ evals/results/
 .pytest_cache/
 frontend/node_modules/
 frontend/dist/
+.rag_index_eval_*/

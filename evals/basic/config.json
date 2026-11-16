@@ -1,0 +1,6 @@
+{
+  "name": "basic",
+  "docs": "../../docs",
+  "today": "2026-11-16",
+  "description": "Single-fact lookups over the sample Acme docs. A smoke test: every system should score ~100%."
+}

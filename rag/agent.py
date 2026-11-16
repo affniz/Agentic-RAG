@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import json
 import re
 from dataclasses import dataclass, field
@@ -24,7 +25,18 @@ PRICES: dict[str, tuple[float, float, float, float]] = {
 
 CITATION_RE = re.compile(r"\[([^\[\]#\n]+)#(\d+)\]")
 
-SYSTEM_PROMPT = """\
+# Rules for answering from retrieved text. Shared with the non-agentic baseline
+# (rag/baseline.py) so evals compare retrieval strategies, not prompts.
+ANSWER_RULES = """\
+- Answer only from the retrieved text. If the knowledge base doesn't cover something, say so \
+plainly rather than guessing. If the question rests on a false premise, say so.
+- Documents can be superseded, amended or overridden (newer policy versions, amendments, \
+decision logs, country or team exceptions). Use the rule in force on the date the question \
+is about, and mention when an exception or newer rule changes the answer.
+- Cite every factual claim inline as [source#chunk], e.g. [policy.md#2].
+- Keep answers concise and direct."""
+
+AGENT_INSTRUCTIONS = """\
 You are a research assistant that answers questions using a private knowledge base.
 You have tools to list the documents, search them, and read chunks in full.
 
@@ -32,12 +44,17 @@ How to work:
 - Search before answering anything that depends on the knowledge base. Break compound \
 questions into separate searches (in parallel when they are independent), and rephrase \
 or use synonyms when a search misses.
-- When a hit looks relevant but cut off, read the neighbouring chunks of that document.
-- Stop searching once you have enough evidence; don't repeat searches that already worked.
-- Answer only from what you retrieved. If the knowledge base doesn't cover something, \
-say so plainly rather than guessing.
-- Cite every factual claim inline as [source#chunk], e.g. [policy.md#2].
-- Keep answers concise and direct."""
+- When an answer depends on another fact (a person's office, a team's director, a date's \
+rotation), look that fact up too instead of assuming it.
+- When a hit looks relevant but cut off, or a list may continue, read the neighbouring chunks.
+- Stop searching once you have enough evidence; don't repeat searches that already worked."""
+
+
+def system_prompt(instructions: str, today: str) -> str:
+    return f"{instructions}\n\nWhen answering:\n{ANSWER_RULES}\n\nToday's date: {today}."
+
+
+SYSTEM_PROMPT = system_prompt(AGENT_INSTRUCTIONS, "YYYY-MM-DD")  # for reference; see RagAgent
 
 TOOLS: list[dict[str, Any]] = [
     {
@@ -89,7 +106,13 @@ TOOLS: list[dict[str, Any]] = [
 ]
 
 
-def build_handlers(kb: KnowledgeBase) -> dict[str, Callable[..., str]]:
+def build_handlers(kb: KnowledgeBase, seen: list[str] | None = None) -> dict[str, Callable[..., str]]:
+    """Tool implementations. Every chunk returned to the model is recorded in `seen` as 'source#index'."""
+    seen = seen if seen is not None else []
+
+    def note(chunks: Any) -> None:
+        seen.extend(f"{c.source}#{c.index}" for c in chunks)
+
     def list_documents() -> str:
         src = kb.sources()
         if not src:
@@ -100,6 +123,7 @@ def build_handlers(kb: KnowledgeBase) -> dict[str, Callable[..., str]]:
         hits = kb.search(query, k=max(1, min(int(k), 10)), source=source or None)
         if not hits:
             return "No results."
+        note(c for c, _ in hits)
         return "\n\n".join(f"{c.label()}\n{c.text}" for c, _ in hits)
 
     def read_chunks(source: str, start: int, end: int) -> str:
@@ -107,6 +131,7 @@ def build_handlers(kb: KnowledgeBase) -> dict[str, Callable[..., str]]:
         chunks = kb.get_chunks(source, start, end)
         if not chunks:
             return f"No chunks {start}-{end} found for '{source}'."
+        note(chunks)
         return "\n\n".join(f"{c.label()}\n{c.text}" for c in chunks)
 
     return {
@@ -151,6 +176,7 @@ class Answer:
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     stop: str = "end_turn"  # end_turn | refusal | max_tokens | step_limit
     citations: list[dict[str, Any]] = field(default_factory=list)
+    retrieved: list[str] = field(default_factory=list)  # chunks shown to the model, 'source#index'
 
 
 Event = dict[str, Any]
@@ -172,10 +198,13 @@ class RagAgent:
         max_steps: int = 12,
         on_event: Callable[[Event], None] | None = None,
         client: Any = None,
+        today: str | None = None,
     ):
         self.client = client or anthropic.Anthropic()
         self.kb = kb
-        self.handlers = build_handlers(kb)
+        self._seen: list[str] = []
+        self.handlers = build_handlers(kb, self._seen)
+        self.system = system_prompt(AGENT_INSTRUCTIONS, today or datetime.date.today().isoformat())
         self.model = model
         self.effort = effort
         self.max_steps = max_steps
@@ -195,7 +224,7 @@ class RagAgent:
         return dict(
             model=self.model,
             max_tokens=16000,
-            system=SYSTEM_PROMPT,
+            system=self.system,
             tools=TOOLS,
             messages=self.messages,
             output_config={"effort": self.effort},
@@ -219,6 +248,7 @@ class RagAgent:
         self.messages.append({"role": "user", "content": question})
         usage = Usage()
         calls: list[dict[str, Any]] = []
+        self._seen.clear()
 
         def finish(text: str, stop: str) -> Answer:
             self.total.input_tokens += usage.input_tokens
@@ -226,7 +256,8 @@ class RagAgent:
             self.total.cache_read_tokens += usage.cache_read_tokens
             self.total.cache_write_tokens += usage.cache_write_tokens
             self.total.api_calls += usage.api_calls
-            ans = Answer(text, usage, usage.cost(self.model), calls, stop, self._citations(text))
+            ans = Answer(text, usage, usage.cost(self.model), calls, stop, self._citations(text),
+                         list(dict.fromkeys(self._seen)))
             self.on_event({"type": "answer", "text": text, "stop": stop, "citations": ans.citations})
             self.on_event({"type": "usage", "usage": usage, "cost_usd": ans.cost_usd})
             return ans

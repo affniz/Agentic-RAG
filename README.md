@@ -19,8 +19,9 @@ question ─► Claude (claude-sonnet-5-5) ──tool calls──► list_docume
 |---|---|
 | `rag/store.py` | Loads `.md` / `.txt` / `.pdf`; heading-aware chunking (each chunk knows its Markdown section path); incremental indexing into ChromaDB (local all-MiniLM-L6-v2 ONNX embeddings) + BM25; hybrid search with Reciprocal Rank Fusion; optional local cross-encoder reranking |
 | `rag/agent.py` | The agent loop: strict tool schemas, parallel tool execution, multi-turn memory, step limit, refusal / `max_tokens` handling, event callbacks, per-question cost tracking |
-| `rag/evaluate.py` | Retrieval metrics (recall@k, hit@k, MRR per search mode) and end-to-end answer grading with a Claude Haiku judge |
-| `evals/questions.jsonl` | 20 questions over the sample docs: evidence snippets, expected sources, reference answers (incl. one unanswerable) |
+| `rag/evaluate.py` | Retrieval metrics, and answer grading that compares the agent with the one-shot baseline per question category |
+| `rag/baseline.py` | One-shot RAG baseline (retrieve once, answer once) for comparison |
+| `evals/basic`, `evals/hard` | Eval sets: questions with evidence snippets, expected sources and reference answers, plus the hard set's own documents |
 | `main.py` | CLI |
 | `server/app.py` | FastAPI backend for the web UI: streaming chat over Server-Sent Events, conversations, chunk lookup for citations |
 | `frontend/` | React + Vite + Tailwind chat UI |
@@ -74,21 +75,35 @@ python -m uvicorn server.app:app --port 8000           # then open http://localh
 
 ## Evaluation
 
+Two eval sets ship with the repo, each a folder with `questions.jsonl`, `config.json` and its own documents:
+
+| Set | What it tests |
+|---|---|
+| `evals/basic` (20 questions) | Single-fact lookups over the sample Acme docs. A smoke test - everything should score ~100%. |
+| `evals/hard` (40 questions) | A fictional company (Halcyon Robotics, 19 docs) built so that **one search with the question text is not enough**: multi-step lookups (person → manager → office → cost tier → hotel cap), policies that were superseded, amended or overridden by a decision log, country exceptions, lists spread across sections, false premises, unanswerable questions, and simple control questions. |
+
 ```bash
-python main.py eval                        # retrieval metrics for bm25 / vector / hybrid / hybrid+rerank - free
-python main.py eval --answers              # also runs the agent on every question and grades the answers
-python main.py eval --answers --limit 5    # cheaper trial run
+python main.py eval --set evals/hard                         # retrieval metrics only - free
+python main.py eval --set evals/hard --answers --systems agentic,naive --model claude-haiku-5-5
+python main.py eval --set evals/hard --answers --systems agentic,naive              # Sonnet
+python main.py eval --set evals/hard --answers --systems naive --naive-k 15        # more context, still one shot
 ```
 
-Answer grading uses `claude-haiku-5-5` as a judge against each reference answer and checks that the
-answer cites the expected document. A full run of the 20 questions costs roughly $0.50–1 on Sonnet
-(estimate). Results are saved to `evals/results/`. **Replace the questions with ones about your own
-documents** - the sample corpus is small enough that every search mode does well on it.
+`--systems agentic,naive` compares the agent with a **one-shot RAG baseline** (`rag/baseline.py`):
+retrieve the top-k chunks for the question, answer in a single call. Both use the same retriever,
+reranker, model, effort and answering rules, so the difference is the agent loop itself. The report
+breaks accuracy down by question category and shows **evidence retrieved** - how much of the text
+needed to answer each question the system actually saw.
+
+Answers are graded by a `claude-haiku-5-5` judge against reference answers (`--judge-model` to change),
+and results are saved to `evals/results/`. Other flags: `--category multi_hop`, `--limit N`, `--workers N`.
+
+Rough cost for the hard set (estimates): Haiku, both systems ≈ $0.15; Sonnet, both systems ≈ $1-2.
 
 ## Tests
 
 ```bash
-pip install -r requirements-dev.txt && pytest -q   # 14 tests, no API key needed
+pip install -r requirements-dev.txt && pytest -q   # 18 tests, no API key needed
 ```
 
 ## Settings worth knowing

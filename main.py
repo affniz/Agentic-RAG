@@ -4,8 +4,9 @@
     python main.py search "query" [--mode ...]     test retrieval only (no API call)
     python main.py ask "question"                  one-shot question
     python main.py chat                            interactive multi-turn chat
-    python main.py eval                            retrieval metrics (free)
-    python main.py eval --answers                  + end-to-end answer grading (calls the API)
+    python main.py eval [--set evals/hard]         retrieval metrics (free)
+    python main.py eval --set evals/hard --answers --systems agentic,naive
+                                                   + answer grading, agent vs one-shot RAG (calls the API)
 """
 
 from __future__ import annotations
@@ -53,11 +54,16 @@ def main() -> None:
         s.add_argument("--effort", default="medium", choices=["low", "medium", "high", "xhigh", "max"])
 
     s = sub.add_parser("eval")
-    s.add_argument("--questions", default="evals/questions.jsonl")
-    s.add_argument("-k", type=int, default=5)
-    s.add_argument("--answers", action="store_true", help="also run the agent and grade answers (costs money)")
+    s.add_argument("--set", default="evals/basic", help="eval set directory (evals/basic, evals/hard)")
+    s.add_argument("-k", type=int, default=5, help="k for the retrieval metrics")
+    s.add_argument("--answers", action="store_true", help="also answer and grade every question (costs money)")
+    s.add_argument("--systems", default="agentic", help="comma-separated: agentic,naive")
+    s.add_argument("--naive-k", type=int, default=5, help="chunks the naive baseline retrieves")
     s.add_argument("--model", default=None)
     s.add_argument("--effort", default="medium")
+    s.add_argument("--judge-model", default=None, help="default claude-haiku-5-5")
+    s.add_argument("--workers", type=int, default=4, help="questions answered in parallel")
+    s.add_argument("--category", default=None, help="only questions in this category")
     s.add_argument("--limit", type=int, default=None, help="only the first N questions")
 
     args = p.parse_args()
@@ -82,21 +88,7 @@ def main() -> None:
     model = getattr(args, "model", None) or MODEL
     try:
         if args.cmd == "eval":
-            from rag.evaluate import answer_eval, load_questions, retrieval_eval
-
-            questions = load_questions(args.questions)[: args.limit]
-            print(f"Retrieval (k={args.k}, {sum(1 for q in questions if q.get('evidence'))} questions with evidence):")
-            for name, m in retrieval_eval(kb, questions, k=args.k).items():
-                extra = f"  ({m['note']})" if "note" in m else ""
-                print(f"  {name:<15} recall@k={m['recall@k']:.2f}  hit@k={m['hit@k']:.2f}  mrr={m['mrr']:.2f}{extra}")
-            if args.answers:
-                print(f"\nAnswers ({model}, effort={args.effort}):")
-                s = answer_eval(kb, questions, model=model, effort=args.effort)
-                print(f"\n  correct={s['correct']:.0%}  partial={s['partially_correct']:.0%}  "
-                      f"cited expected sources={'n/a' if s['cited_expected_sources'] is None else format(s['cited_expected_sources'], '.0%')}")
-                print(f"  avg tool calls={s['avg_tool_calls']:.1f}  avg time={s['avg_seconds']:.1f}s")
-                print(f"  cost: agent ${s['agent_cost_usd'] or 0:.3f} + judge ${s['judge_cost_usd'] or 0:.3f}")
-                print(f"  details: {s['results_file']}")
+            run_eval(args, model)
             return
 
         agent = RagAgent(kb, model=model, effort=args.effort, on_event=None if args.quiet else print_event)
@@ -131,6 +123,48 @@ def main() -> None:
         sys.exit(f"API error {e.status_code}: {e.message}")
     except anthropic.APIConnectionError:
         sys.exit("Could not reach the Anthropic API.")
+
+
+def run_eval(args: argparse.Namespace, model: str) -> None:
+    from rag.evaluate import JUDGE_MODEL, answer_eval, load_set, retrieval_eval, set_knowledge_base
+
+    es = load_set(args.set)
+    questions = [q for q in es.questions if not args.category or q.get("category") == args.category][: args.limit]
+    kb = set_knowledge_base(es, rerank=not args.no_rerank)
+    print(f"Eval set '{es.name}': {len(questions)} questions, {len(kb.sources())} documents, "
+          f"{len(kb.chunks)} chunks{f', today={es.today}' if es.today else ''}")
+
+    print(f"\nSingle-query retrieval with the question text (k={args.k}):")
+    for name, m in retrieval_eval(kb, questions, k=args.k).items():
+        extra = f"  ({m['note']})" if "note" in m else ""
+        print(f"  {name:<15} recall@k={m['recall@k']:.2f}  hit@k={m['hit@k']:.2f}  mrr={m['mrr']:.2f}{extra}")
+    if not args.answers:
+        return
+
+    systems = tuple(x.strip() for x in args.systems.split(",") if x.strip())
+    print(f"\nAnswers ({model}, effort={args.effort}, systems={','.join(systems)}):")
+    s = answer_eval(kb, questions, model=model, effort=args.effort, systems=systems, today=es.today,
+                    naive_k=args.naive_k, judge_model=args.judge_model or JUDGE_MODEL,
+                    workers=args.workers, label=es.name)
+
+    res = s["systems"]
+    pct = lambda v: "n/a" if v is None else f"{v:.0%}"
+    head = "".join(f"{(name if name != 'naive' else f'naive (k={args.naive_k})'):>16}" for name in systems)
+    print(f"\n{'':<28}{head}")
+    print(f"{'correct':<28}" + "".join(f"{pct(res[n]['correct']):>16}" for n in systems))
+    cats = sorted({c for n in systems for c in res[n]['by_category']})
+    for c in cats:
+        cnt = next(res[n]['by_category'][c]['n'] for n in systems if c in res[n]['by_category'])
+        print(f"{'  ' + c + f' ({cnt})':<28}" + "".join(
+            f"{pct(res[n]['by_category'].get(c, {}).get('correct')):>16}" for n in systems))
+    print(f"{'partially correct':<28}" + "".join(f"{pct(res[n]['partially_correct']):>16}" for n in systems))
+    print(f"{'evidence retrieved':<28}" + "".join(f"{pct(res[n]['evidence_recall']):>16}" for n in systems))
+    print(f"{'cited expected sources':<28}" + "".join(f"{pct(res[n]['cited_expected_sources']):>16}" for n in systems))
+    print(f"{'avg API calls':<28}" + "".join(f"{res[n]['avg_api_calls']:>16.1f}" for n in systems))
+    print(f"{'avg seconds':<28}" + "".join(f"{res[n]['avg_seconds']:>16.1f}" for n in systems))
+    print(f"{'cost (USD)':<28}" + "".join(f"{'$' + format(res[n]['cost_usd'], '.3f'):>16}" for n in systems))
+    judge_cost = sum(res[n]["judge_cost_usd"] for n in systems)
+    print(f"\njudge ({s['judge_model']}) cost ${judge_cost:.3f}. Details: {s['results_file']}")
 
 
 if __name__ == "__main__":
