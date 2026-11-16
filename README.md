@@ -56,7 +56,7 @@ python main.py chat                        # multi-turn; /reset, /cost, /quit
 
 ## Web UI
 
-![Chat UI in dark mode with a cited answer, the agent's search step and the source panel open](assets/screenshot.png)
+![Chat UI in dark mode: the agent runs three searches, answers with citations, and the cited chunk is open in the source panel](assets/screenshot.png)
 
 Four screens, all in the sidebar. Works on mobile and in dark mode.
 
