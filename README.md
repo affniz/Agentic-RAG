@@ -136,7 +136,7 @@ Rough cost for the hard set (estimates): Haiku, both systems ≈ $0.15; Sonnet, 
 ## Tests
 
 ```bash
-pip install -r requirements-dev.txt && pytest -q   # 31 tests, no API key needed
+pip install -r requirements-dev.txt && pytest -q   # 30 tests, no API key needed
 ```
 
 ## Settings worth knowing
