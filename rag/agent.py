@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -20,6 +21,8 @@ PRICES: dict[str, tuple[float, float, float, float]] = {
     "claude-opus-5-5": (4.00, 20.00, 0.20, 5.00),
     "claude-haiku-5-5": (0.10, 0.50, 0.01, 0.125),
 }
+
+CITATION_RE = re.compile(r"\[([^\[\]#\n]+)#(\d+)\]")
 
 SYSTEM_PROMPT = """\
 You are a research assistant that answers questions using a private knowledge base.
@@ -147,6 +150,7 @@ class Answer:
     cost_usd: float | None
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     stop: str = "end_turn"  # end_turn | refusal | max_tokens | step_limit
+    citations: list[dict[str, Any]] = field(default_factory=list)
 
 
 Event = dict[str, Any]
@@ -155,8 +159,9 @@ Event = dict[str, Any]
 class RagAgent:
     """Runs the tool loop. Pass `on_event` to observe progress (used by the CLI and the future UI).
 
-    Events: {"type": "tool_call", "name", "args"}, {"type": "tool_result", "name", "is_error", "chars"},
-            {"type": "answer", "text"}, {"type": "usage", "usage", "cost_usd"}
+    Events: {"type": "text_delta", "text"}, {"type": "tool_call", "id", "name", "args"},
+            {"type": "tool_result", "id", "name", "is_error", "chars"},
+            {"type": "answer", "text", "stop", "citations"}, {"type": "usage", "usage", "cost_usd"}
     """
 
     def __init__(
@@ -169,6 +174,7 @@ class RagAgent:
         client: Any = None,
     ):
         self.client = client or anthropic.Anthropic()
+        self.kb = kb
         self.handlers = build_handlers(kb)
         self.model = model
         self.effort = effort
@@ -178,7 +184,15 @@ class RagAgent:
         self.total = Usage()
 
     def _create(self, **extra: Any) -> Any:
-        return self.client.beta.messages.create(
+        """One model call, streamed: text deltas go out as events, the full message is returned."""
+        with self.client.beta.messages.stream(**self._params(**extra)) as stream:
+            for event in stream:
+                if event.type == "text":
+                    self.on_event({"type": "text_delta", "text": event.text})
+            return stream.get_final_message()
+
+    def _params(self, **extra: Any) -> dict[str, Any]:
+        return dict(
             model=self.model,
             max_tokens=16000,
             system=SYSTEM_PROMPT,
@@ -212,8 +226,8 @@ class RagAgent:
             self.total.cache_read_tokens += usage.cache_read_tokens
             self.total.cache_write_tokens += usage.cache_write_tokens
             self.total.api_calls += usage.api_calls
-            ans = Answer(text, usage, usage.cost(self.model), calls, stop)
-            self.on_event({"type": "answer", "text": text})
+            ans = Answer(text, usage, usage.cost(self.model), calls, stop, self._citations(text))
+            self.on_event({"type": "answer", "text": text, "stop": stop, "citations": ans.citations})
             self.on_event({"type": "usage", "usage": usage, "cost_usd": ans.cost_usd})
             return ans
 
@@ -237,9 +251,10 @@ class RagAgent:
                     continue
                 args = block.input if isinstance(block.input, dict) else json.loads(block.input)
                 calls.append({"name": block.name, "args": args})
-                self.on_event({"type": "tool_call", "name": block.name, "args": args})
+                self.on_event({"type": "tool_call", "id": block.id, "name": block.name, "args": args})
                 output, is_error = self._run_tool(block.name, args)
-                self.on_event({"type": "tool_result", "name": block.name, "is_error": is_error, "chars": len(output)})
+                self.on_event({"type": "tool_result", "id": block.id, "name": block.name, "is_error": is_error,
+                               "chars": len(output)})
                 results.append(
                     {"type": "tool_result", "tool_use_id": block.id, "content": output, "is_error": is_error}
                 )
@@ -251,6 +266,19 @@ class RagAgent:
         usage.add(response.usage)
         self.messages.append({"role": "assistant", "content": response.content})
         return finish(_text(response) or "(no text in response)", "step_limit")
+
+    def _citations(self, text: str) -> list[dict[str, Any]]:
+        """Resolve [source#n] markers in the answer to the chunks they point at."""
+        out, seen = [], set()
+        for source, idx in CITATION_RE.findall(text):
+            key = (source, int(idx))
+            if key in seen:
+                continue
+            seen.add(key)
+            chunk = next(iter(self.kb.get_chunks(source, key[1], key[1])), None)
+            out.append({"source": source, "index": key[1], "section": chunk.section if chunk else None,
+                        "found": chunk is not None})
+        return out
 
     def reset(self) -> None:
         self.messages = []

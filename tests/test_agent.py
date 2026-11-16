@@ -1,34 +1,18 @@
-from types import SimpleNamespace as NS
-
 import pytest
 
 from rag.agent import RagAgent
+from rag.fake_llm import DemoClient, ScriptedClient, message, text_block, tool_block, usage
 from rag.store import KnowledgeBase
 
-
-def usage(i=100, o=50):
-    return NS(input_tokens=i, output_tokens=o, cache_read_input_tokens=0, cache_creation_input_tokens=0)
+FakeClient = ScriptedClient
 
 
 def text(t):
-    return NS(type="text", text=t)
+    return text_block(t)
 
 
 def tool(id_, name, **inp):
-    return NS(type="tool_use", id=id_, name=name, input=inp)
-
-
-class FakeClient:
-    """Returns scripted responses and records each request."""
-
-    def __init__(self, responses):
-        self.responses = list(responses)
-        self.requests = []
-        self.beta = NS(messages=NS(create=self._create))
-
-    def _create(self, **kw):
-        self.requests.append({**kw, "messages": list(kw["messages"])})
-        return self.responses.pop(0)
+    return tool_block(id_, name, **inp)
 
 
 @pytest.fixture
@@ -43,12 +27,12 @@ def kb(tmp_path):
 
 def test_parallel_tool_calls_return_in_one_message(kb):
     client = FakeClient([
-        NS(stop_reason="tool_use", usage=usage(), content=[
+        message(stop_reason="tool_use", usage=usage(100, 50), content=[
             tool("t1", "search_knowledge_base", query="carry over", k=3, source=None),
             tool("t2", "read_chunks", source="vacation.md", start=0, end=0),
             tool("t3", "no_such_tool"),
         ]),
-        NS(stop_reason="end_turn", usage=usage(), content=[text("5 days [vacation.md#0]")]),
+        message(stop_reason="end_turn", usage=usage(100, 50), content=[text("5 days [vacation.md#0]")]),
     ])
     events = []
     agent = RagAgent(kb, client=client, on_event=events.append)
@@ -65,26 +49,49 @@ def test_parallel_tool_calls_return_in_one_message(kb):
 
 
 def test_step_limit_forces_final_answer(kb):
-    looping = [NS(stop_reason="tool_use", usage=usage(), content=[tool(f"t{i}", "list_documents")]) for i in range(3)]
-    client = FakeClient(looping + [NS(stop_reason="end_turn", usage=usage(), content=[text("best effort")])])
+    looping = [message(stop_reason="tool_use", usage=usage(100, 50), content=[tool(f"t{i}", "list_documents")]) for i in range(3)]
+    client = FakeClient(looping + [message(stop_reason="end_turn", usage=usage(100, 50), content=[text("best effort")])])
     ans = RagAgent(kb, client=client, max_steps=3).ask("q")
     assert ans.stop == "step_limit" and ans.text == "best effort"
     assert client.requests[-1]["tool_choice"] == {"type": "none"}
 
 
 def test_refusal(kb):
-    client = FakeClient([NS(stop_reason="refusal", usage=usage(), content=[])])
+    client = FakeClient([message(stop_reason="refusal", usage=usage(100, 50), content=[])])
     ans = RagAgent(kb, client=client).ask("q")
     assert ans.stop == "refusal"
 
 
 def test_history_carries_across_questions(kb):
     client = FakeClient([
-        NS(stop_reason="end_turn", usage=usage(), content=[text("a1")]),
-        NS(stop_reason="end_turn", usage=usage(), content=[text("a2")]),
+        message(stop_reason="end_turn", usage=usage(100, 50), content=[text("a1")]),
+        message(stop_reason="end_turn", usage=usage(100, 50), content=[text("a2")]),
     ])
     agent = RagAgent(kb, client=client)
     agent.ask("q1")
     agent.ask("q2")
     assert len(client.requests[1]["messages"]) == 3  # q1, a1, q2
     assert agent.total.api_calls == 2
+
+
+def test_streaming_events_and_citations(kb):
+    client = FakeClient([NS_end("Up to 5 days [vacation.md#0] and more [nope.md#9].")])
+    events = []
+    ans = RagAgent(kb, client=client, on_event=events.append).ask("q")
+    streamed = "".join(e["text"] for e in events if e["type"] == "text_delta")
+    assert streamed == ans.text
+    assert ans.citations == [
+        {"source": "vacation.md", "index": 0, "section": "Vacation", "found": True},
+        {"source": "nope.md", "index": 9, "section": None, "found": False},
+    ]
+    assert [e["type"] for e in events][-2:] == ["answer", "usage"]
+
+
+def test_demo_client_runs_end_to_end(kb):
+    ans = RagAgent(kb, client=DemoClient(delay=0)).ask("how many days carry over")
+    assert ans.stop == "end_turn" and "[vacation.md#0]" in ans.text
+    assert ans.tool_calls[0]["name"] == "search_knowledge_base"
+
+
+def NS_end(t):
+    return message("end_turn", [text_block(t)], usage())

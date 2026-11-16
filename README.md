@@ -22,6 +22,9 @@ question ─► Claude (claude-sonnet-5-5) ──tool calls──► list_docume
 | `rag/evaluate.py` | Retrieval metrics (recall@k, hit@k, MRR per search mode) and end-to-end answer grading with a Claude Haiku judge |
 | `evals/questions.jsonl` | 20 questions over the sample docs: evidence snippets, expected sources, reference answers (incl. one unanswerable) |
 | `main.py` | CLI |
+| `server/app.py` | FastAPI backend for the web UI: streaming chat over Server-Sent Events, conversations, chunk lookup for citations |
+| `frontend/` | React + Vite + Tailwind chat UI |
+| `rag/fake_llm.py` | Stand-in Claude client for tests and for running the UI with no API key (demo mode) |
 | `tests/` | pytest suite (no API key needed) |
 
 ## Setup
@@ -49,6 +52,26 @@ python main.py chat                        # multi-turn; /reset, /cost, /quit
 `ask` / `chat` take `--model` (`claude-sonnet-5-5` default, `claude-opus-5-5`, `claude-haiku-5-5`),
 `--effort` (`low` … `max`, default `medium`) and `-q` to hide the tool trace and cost line.
 
+## Web UI
+
+![Chat UI with a cited answer and the source panel open](assets/screenshot.png)
+
+Streaming answers, a live trace of the agent's searches, numbered citation chips that open the
+cited chunk (with its neighbours) in a side panel, per-answer cost, model/effort pickers, and a
+conversation list. Works on mobile and in dark mode.
+
+```bash
+cd frontend && npm install && npm run build && cd ..   # once, and after frontend changes
+uvicorn server.app:app --port 8000                     # then open http://localhost:8000
+```
+
+- **Demo mode:** `RAG_FAKE_LLM=1 uvicorn server.app:app` runs the whole UI with real search but a
+  fake model: no API key, no cost. Handy for UI work.
+- **Frontend dev with hot reload:** run uvicorn as above, then `cd frontend && npm run dev` and open
+  http://localhost:5173 (API calls are proxied to :8000).
+- Other settings: `RAG_INDEX` (index directory), `RAG_RERANK=0` (turn off the reranker).
+- Conversations are kept in memory for now and are lost when the server restarts.
+
 ## Evaluation
 
 ```bash
@@ -65,7 +88,7 @@ documents** - the sample corpus is small enough that every search mode does well
 ## Tests
 
 ```bash
-pip install -r requirements-dev.txt && pytest -q
+pip install -r requirements-dev.txt && pytest -q   # 14 tests, no API key needed
 ```
 
 ## Settings worth knowing
