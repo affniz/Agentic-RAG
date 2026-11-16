@@ -67,6 +67,9 @@ def main() -> None:
         r = kb.ingest(args.docs_dir, rebuild=args.rebuild)
         print(f"Index: {r.chunks} chunks from {len(kb.sources())} documents "
               f"(added {len(r.added)}, updated {len(r.updated)}, removed {len(r.removed)}, unchanged {r.unchanged}).")
+        if kb.reranker is not None:
+            print("Loading reranker (downloads ~90 MB the first time)...")
+            print("Reranker ready." if kb.reranker.warm() else "Reranker unavailable; search will run without it.")
         return
 
     if args.cmd == "search":

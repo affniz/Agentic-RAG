@@ -148,6 +148,10 @@ class Reranker:
                 self.available = False
         return self._model is not None
 
+    def warm(self) -> bool:
+        """Load (and on first use, download) the model now rather than mid-search."""
+        return self._load()
+
     def score(self, query: str, docs: list[str]) -> list[float] | None:
         if not docs or not self._load():
             return None
