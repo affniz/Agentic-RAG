@@ -73,6 +73,9 @@ export type DocumentRow = {
   modified: number | null;
   chunks: number;
   status: DocStatus;
+  pages: number | null;
+  transcribed: boolean;
+  transcribe_cost_usd: number | null;
 };
 
 export type IngestState = {
@@ -81,6 +84,7 @@ export type IngestState = {
   done?: number;
   total?: number;
   reason?: string;
+  file?: string | null;
   started_at?: number;
   finished_at?: number;
   error?: string;

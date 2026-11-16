@@ -170,3 +170,36 @@ def test_scanned_pdf_from_older_index_is_retried(tmp_path):
 
     kb = KnowledgeBase(tmp_path / "idx", rerank=False, pdf_ocr=lambda p: "# Scan\nMaths 95")
     assert kb.ingest(docs).empty == [] and "scan.pdf" in kb.sources()
+
+
+def test_manual_transcribe_and_undo(tmp_path):
+    """Per-file transcription overrides a PDF's own text (even a junk text layer); clearing undoes it."""
+    from pypdf import PdfWriter
+    from pypdf.generic import NameObject, StreamObject, DictionaryObject
+
+    docs = make_docs(tmp_path)
+    # A PDF whose text layer is only junk long enough to pass the "has text" check.
+    w = PdfWriter()
+    page = w.add_blank_page(width=595, height=842)
+    font = DictionaryObject({NameObject("/Type"): NameObject("/Font"), NameObject("/Subtype"): NameObject("/Type1"),
+                             NameObject("/BaseFont"): NameObject("/Helvetica")})
+    page[NameObject("/Resources")] = DictionaryObject({NameObject("/Font"): DictionaryObject({NameObject("/F1"): w._add_object(font)})})
+    content = StreamObject()
+    content.set_data(b"BT /F1 12 Tf 72 720 Td (SCANNER WATERMARK XJ-2000 PAGE ONE OF ONE) Tj ET")
+    page[NameObject("/Contents")] = w._add_object(content)
+    with open(docs / "card.pdf", "wb") as f:
+        w.write(f)
+
+    kb = KnowledgeBase(tmp_path / "idx", rerank=False)
+    kb.ingest(docs)
+    assert "WATERMARK" in kb.get_chunks("card.pdf", 0, 0)[0].text  # junk layer used, not auto-transcribed
+
+    assert kb.transcribe(docs / "card.pdf", lambda p: "# Report Card\nMaths 95") and kb.has_transcription(docs / "card.pdf")
+    r = kb.ingest(docs, force=["card.pdf"])
+    assert r.updated == ["card.pdf"] and kb.get_chunks("card.pdf", 0, 0)[0].text == "Maths 95"
+    assert kb.ingest(docs).updated == []  # stays transcribed without forcing
+
+    assert kb.clear_transcription(docs / "card.pdf")
+    kb.ingest(docs, force=["card.pdf"])
+    assert "WATERMARK" in kb.get_chunks("card.pdf", 0, 0)[0].text
+    assert not kb.transcribe(docs / "card.pdf", lambda p: "  ")  # nothing returned -> nothing saved

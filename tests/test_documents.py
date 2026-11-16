@@ -91,3 +91,32 @@ def test_scanned_pdf_shows_no_text_status(client):
     body = client.get("/api/documents").json()
     assert {d["name"]: d["status"] for d in body["documents"]}["scan.pdf"] == "empty"
     assert body["ocr"] is False and body["needs_ingest"] is False
+
+
+def test_transcribe_and_undo_one_pdf(client):
+    from tests.test_store import _blank_pdf
+
+    c = client
+    _blank_pdf(c.docs / "scan.pdf", pages=3)
+    c.post("/api/ingest", json={})
+    wait_ingest(c)
+    row = next(d for d in c.get("/api/documents").json()["documents"] if d["name"] == "scan.pdf")
+    assert row["status"] == "empty" and row["pages"] == 3 and row["transcribed"] is False
+    assert row["transcribe_cost_usd"] == pytest.approx(0.0015)
+
+    st = c.post("/api/documents/scan.pdf/transcribe").json()
+    assert st["reason"] == "transcribe" and st["file"] == "scan.pdf"
+    st = wait_ingest(c)
+    assert st["state"] == "done" and st["report"]["updated"] == ["scan.pdf"]
+    row = next(d for d in c.get("/api/documents").json()["documents"] if d["name"] == "scan.pdf")
+    assert row["status"] == "indexed" and row["transcribed"] is True and row["chunks"] > 0
+    first = c.get("/api/documents/scan.pdf/chunks").json()["chunks"][0]
+    assert first["section"] == "Demo transcription of scan.pdf" and "no model was called" in first["text"]
+
+    # Undo: the transcription route must not be mistaken for deleting the document.
+    assert c.delete("/api/documents/scan.pdf/transcription").json()["reason"] == "untranscribe"
+    wait_ingest(c)
+    assert (c.docs / "scan.pdf").exists()
+    assert statuses(c)["scan.pdf"] == "empty"
+    assert c.delete("/api/documents/scan.pdf/transcription").status_code == 404  # nothing to undo
+    assert c.post("/api/documents/vacation.md/transcribe").status_code == 404  # PDFs only

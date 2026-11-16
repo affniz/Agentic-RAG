@@ -3,7 +3,7 @@
     python -m uvicorn server.app:app --reload          # API on :8000 (serves frontend/dist if built)
     RAG_FAKE_LLM=1 python -m uvicorn server.app:app    # demo mode: no API key, no cost
     Settings: RAG_DOCS (documents folder, default ./docs), RAG_INDEX, RAG_RERANK=0,
-              RAG_OCR=1 (transcribe scanned PDFs with Claude)
+              RAG_OCR=1 (transcribe scanned PDFs with Claude automatically)
 
 Chat responses stream as Server-Sent Events. Conversations live in memory for now
 (phase 1); they are lost when the server restarts.
@@ -47,8 +47,19 @@ def _make_ocr() -> Any:
     return claude_pdf_transcriber()
 
 
+def _transcriber() -> Any:
+    """For the per-file "Transcribe with Claude" action (always available; automatic OCR needs RAG_OCR=1)."""
+    if FAKE_LLM:
+        from rag.fake_llm import demo_transcriber
+
+        return demo_transcriber
+    from rag.ocr import claude_pdf_transcriber
+
+    return claude_pdf_transcriber()
+
+
 kb = KnowledgeBase(INDEX_DIR, rerank=RERANK, pdf_ocr=_make_ocr())
-app.include_router(make_router(kb, DOCS_DIR))
+app.include_router(make_router(kb, DOCS_DIR, _transcriber))
 
 
 def _make_client() -> Any:

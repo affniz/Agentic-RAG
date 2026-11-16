@@ -1,4 +1,5 @@
-"""Document management API: list, upload, delete, re-index (background job with progress), search tester."""
+"""Document management API: list, upload, delete, re-index and per-file transcription (background jobs
+with progress), search tester."""
 
 from __future__ import annotations
 
@@ -7,14 +8,19 @@ import re
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from fastapi import APIRouter, HTTPException, UploadFile
 from pydantic import BaseModel
 
+from pypdf import PdfReader
+
 from rag.store import SEARCH_MODES, SUPPORTED, KnowledgeBase
 
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+# Rough Claude Haiku cost of transcribing one PDF page (~1.6k input + ~0.6k output tokens).
+EST_USD_PER_PAGE = 0.0005
+Transcriber = Callable[[Path], str]
 _NAME_OK = re.compile(r"^[^/\\\x00-\x1f]+$")
 
 
@@ -26,20 +32,25 @@ class IngestJob:
         self._lock = threading.Lock()
         self.state: dict[str, Any] = {"state": "idle"}
 
-    def start(self, rebuild: bool = False, reason: str = "manual") -> dict[str, Any]:
+    def start(self, rebuild: bool = False, reason: str = "manual", force: tuple[str, ...] = (),
+              before: Callable[[], None] | None = None, file: str | None = None) -> dict[str, Any]:
+        """Run `before` (e.g. a transcription), then an ingest, in a background thread."""
         if not self._lock.acquire(blocking=False):
-            raise HTTPException(409, "an ingest is already running")
+            raise HTTPException(409, "indexing is already running - try again when it finishes")
         self.state = {"state": "running", "stage": "starting", "done": 0, "total": 0, "reason": reason,
-                      "rebuild": rebuild, "started_at": time.time()}
-        threading.Thread(target=self._run, args=(rebuild,), daemon=True).start()
+                      "rebuild": rebuild, "file": file, "started_at": time.time()}
+        threading.Thread(target=self._run, args=(rebuild, force, before), daemon=True).start()
         return self.state
 
-    def _run(self, rebuild: bool) -> None:
+    def _run(self, rebuild: bool, force: tuple[str, ...], before: Callable[[], None] | None) -> None:
         def progress(stage: str, done: int, total: int) -> None:
             self.state.update(stage=stage, done=done, total=total)
 
         try:
-            r = self.kb.ingest(self.docs_dir, rebuild=rebuild, on_progress=progress)
+            if before is not None:
+                progress("transcribing", 0, 1)
+                before()
+            r = self.kb.ingest(self.docs_dir, rebuild=rebuild, on_progress=progress, force=force)
             self.state.update(state="done", report={"added": r.added, "updated": r.updated, "removed": r.removed,
                                                     "unchanged": r.unchanged, "chunks": r.chunks, "empty": r.empty})
         except Exception as e:  # surfaced in the UI
@@ -57,7 +68,15 @@ class IngestRequest(BaseModel):
     rebuild: bool = False
 
 
-def make_router(kb: KnowledgeBase, docs_dir: Path) -> APIRouter:
+def _pdf_pages(path: Path) -> int | None:
+    try:
+        return len(PdfReader(path).pages)
+    except Exception:  # unreadable or encrypted PDF
+        return None
+
+
+def make_router(kb: KnowledgeBase, docs_dir: Path, transcriber: Callable[[], Transcriber]) -> APIRouter:
+    """transcriber: returns the function that turns a PDF into text (created on first use)."""
     docs_dir.mkdir(parents=True, exist_ok=True)
     root = docs_dir.resolve()
     job = IngestJob(kb, docs_dir)
@@ -86,11 +105,16 @@ def make_router(kb: KnowledgeBase, docs_dir: Path) -> APIRouter:
             status = "new" if rel not in indexed else ("indexed" if indexed[rel] == digest else "changed")
             if status == "indexed" and not counts.get(rel):
                 status = "empty"  # indexed, but no text could be extracted
+            is_pdf = path.suffix.lower() == ".pdf"
+            pages = _pdf_pages(path) if is_pdf else None
             rows.append({"name": rel, "type": path.suffix.lower().lstrip("."), "size": stat.st_size,
-                         "modified": stat.st_mtime, "chunks": counts.get(rel, 0), "status": status})
+                         "modified": stat.st_mtime, "chunks": counts.get(rel, 0), "status": status,
+                         "pages": pages, "transcribed": is_pdf and kb.has_transcription(path),
+                         "transcribe_cost_usd": round((pages or 1) * EST_USD_PER_PAGE, 4) if is_pdf else None})
         on_disk = {r["name"] for r in rows}
         rows += [{"name": rel, "type": Path(rel).suffix.lstrip("."), "size": None, "modified": None,
-                  "chunks": counts.get(rel, 0), "status": "deleted"} for rel in sorted(indexed) if rel not in on_disk]
+                  "chunks": counts.get(rel, 0), "status": "deleted", "pages": None, "transcribed": False,
+                  "transcribe_cost_usd": None} for rel in sorted(indexed) if rel not in on_disk]
         return {"documents": rows, "chunks": len(kb.chunks), "ingest": ingest_state, "ocr": kb.pdf_ocr is not None,
                 "needs_ingest": any(r["status"] not in ("indexed", "empty") for r in rows)}
 
@@ -121,6 +145,35 @@ def make_router(kb: KnowledgeBase, docs_dir: Path) -> APIRouter:
         if saved:
             ingest = job.state if job.running else job.start(reason="upload")
         return {"saved": saved, "rejected": rejected, "ingest": ingest}
+
+    def existing_pdf(name: str) -> Path:
+        path = resolve(name)
+        if path.suffix.lower() != ".pdf" or not path.is_file():
+            raise HTTPException(404, "PDF not found")
+        return path
+
+    # Registered before DELETE /documents/{name:path}, which would otherwise also match these paths.
+    @router.post("/documents/{name:path}/transcribe")
+    def transcribe(name: str) -> dict[str, Any]:
+        """Send one PDF to Claude for transcription, then re-index it. Runs in the background."""
+        path = existing_pdf(name)
+
+        def run() -> None:
+            if not kb.transcribe(path, transcriber()):
+                raise RuntimeError("Claude returned no text for this file - see the server log for details")
+
+        return job.start(reason="transcribe", force=(name,), before=run, file=name)
+
+    @router.delete("/documents/{name:path}/transcription")
+    def clear_transcription(name: str) -> dict[str, Any]:
+        """Go back to the PDF's own text layer, then re-index it."""
+        path = existing_pdf(name)
+        if not kb.has_transcription(path):
+            raise HTTPException(404, "this file has no transcription")
+        if job.running:
+            raise HTTPException(409, "indexing is already running - try again when it finishes")
+        kb.clear_transcription(path)
+        return job.start(reason="untranscribe", force=(name,), file=name)
 
     @router.delete("/documents/{name:path}")
     def delete(name: str) -> dict[str, Any]:

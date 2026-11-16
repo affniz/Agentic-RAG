@@ -77,7 +77,7 @@ python -m uvicorn server.app:app --port 8000           # then open http://localh
   fake model: no API key, no cost. Handy for UI work.
 - **Frontend dev with hot reload:** run the server as above, then `cd frontend && npm run dev` and open
   http://localhost:5173 (API calls are proxied to :8000).
-- **Scanned PDFs** (images of pages, no text layer) can't be read by the text extractor; they show as "No text found" and aren't searchable. Start the server with `RAG_OCR=1` (or run `python main.py ingest --ocr`) and re-index to have Claude Haiku transcribe them. Each such PDF is sent to the Anthropic API once; the transcription is cached in the index folder.
+- **Scanned PDFs** (images of pages, no text layer) can't be read by the text extractor; they show as "No text found". Click **Transcribe** on the file (or **Transcribe with Claude** in the document viewer, which also works for PDFs whose text layer is junk): after a confirmation showing what's sent and the estimated cost, Claude Haiku transcribes the page images and the file is re-indexed. Each file is sent once (the transcription is cached in the index folder), and "Use the PDF's own text instead" undoes it. To transcribe text-less PDFs automatically - e.g. a large folder - start the server with `RAG_OCR=1` or run `python main.py ingest --ocr`.
 - Other settings: `RAG_DOCS` (documents folder, default `./docs`), `RAG_INDEX` (index directory), `RAG_RERANK=0` (turn off the reranker).
 - Conversations are kept in memory for now and are lost when the server restarts.
 
@@ -136,7 +136,7 @@ Rough cost for the hard set (estimates): Haiku, both systems ≈ $0.15; Sonnet, 
 ## Tests
 
 ```bash
-pip install -r requirements-dev.txt && pytest -q   # 25 tests, no API key needed
+pip install -r requirements-dev.txt && pytest -q   # 31 tests, no API key needed
 ```
 
 ## Settings worth knowing

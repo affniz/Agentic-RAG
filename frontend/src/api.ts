@@ -26,6 +26,9 @@ export const api = {
     return fetch("/api/documents", { method: "POST", body: form }).then(json<UploadResponse>);
   },
   deleteDocument: (name: string) => fetch(`/api/documents/${path(name)}`, { method: "DELETE" }).then(json),
+  transcribe: (name: string) => fetch(`/api/documents/${path(name)}/transcribe`, { method: "POST" }).then(json<IngestState>),
+  clearTranscription: (name: string) =>
+    fetch(`/api/documents/${path(name)}/transcription`, { method: "DELETE" }).then(json<IngestState>),
   ingest: (rebuild = false) =>
     fetch("/api/ingest", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ rebuild }) })
       .then(json<IngestState>),

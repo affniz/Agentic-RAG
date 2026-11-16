@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type DragEvent } from "react";
 import { api } from "./api";
 import { Icon } from "./components";
-import type { DocChunks, DocStatus, DocumentsResponse, Health, IngestState, SearchResponse } from "./types";
+import type { DocChunks, DocStatus, DocumentRow, DocumentsResponse, Health, IngestState, SearchResponse } from "./types";
 
 // ---------------------------------------------------------------- helpers
 
@@ -39,6 +39,7 @@ export function DocumentsPage({ health, onIndexChanged }: { health: Health | nul
   const [error, setError] = useState<string | null>(null);
   const [rejected, setRejected] = useState<{ name: string; reason: string }[]>([]);
   const [uploading, setUploading] = useState(false);
+  const [confirm, setConfirm] = useState<DocumentRow | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -106,8 +107,28 @@ export function DocumentsPage({ health, onIndexChanged }: { health: Health | nul
     }
   }
 
+  async function transcribe(row: DocumentRow) {
+    setConfirm(null);
+    setError(null);
+    try {
+      setIngest(await api.transcribe(row.name));
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
+
+  async function untranscribe(name: string) {
+    setError(null);
+    try {
+      setIngest(await api.clearTranscription(name));
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
+
   const running = ingest.state === "running";
   const docs = data?.documents ?? [];
+  const viewingRow = viewing ? docs.find((d) => d.name === viewing.name) : undefined;
 
   return (
     <div className="flex min-h-0 flex-1">
@@ -132,7 +153,7 @@ export function DocumentsPage({ health, onIndexChanged }: { health: Health | nul
 
           <IngestBanner ingest={ingest} />
           {error && <Alert tone="error">{error}</Alert>}
-          {!running && <EmptyFilesNotice docs={docs} ocr={!!data?.ocr} onReindex={() => reindex(false)} />}
+          {!running && <EmptyFilesNotice docs={docs} ocr={!!data?.ocr} onReindex={() => reindex(false)} onTranscribe={setConfirm} />}
           {data?.needs_ingest && !running && (
             <Alert tone="info">Some documents aren't indexed yet or have changed. Re-index to make them searchable.</Alert>
           )}
@@ -156,7 +177,7 @@ export function DocumentsPage({ health, onIndexChanged }: { health: Health | nul
                   Not uploaded: {rejected.map((r) => `${r.name} (${r.reason})`).join("; ")}
                 </Alert>
               )}
-              <FileTable docs={docs} onView={(name) => setViewing({ name })} onDelete={remove} busy={running} />
+              <FileTable docs={docs} onView={(name) => setViewing({ name })} onDelete={remove} onTranscribe={setConfirm} busy={running} compact={!!viewing} />
             </div>
           ) : (
             <SearchTester reranker={!!health?.reranker} onOpen={(name, focus) => setViewing({ name, focus })} />
@@ -164,11 +185,15 @@ export function DocumentsPage({ health, onIndexChanged }: { health: Health | nul
         </div>
       </div>
 
+      {confirm && <ConfirmTranscribe row={confirm} onCancel={() => setConfirm(null)} onConfirm={() => transcribe(confirm)} />}
+
       {viewing && (
         <>
           <div className="fixed inset-0 z-20 bg-black/30 lg:hidden" onClick={() => setViewing(null)} />
           <aside className="fixed inset-y-0 right-0 z-30 w-full max-w-md border-l border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950 lg:static lg:w-[28rem]">
-            <DocumentPanel name={viewing.name} focus={viewing.focus} onClose={() => setViewing(null)} />
+            <DocumentPanel key={`${viewing.name}:${viewingRow?.chunks}:${viewingRow?.transcribed}:${viewingRow?.modified}`} name={viewing.name} focus={viewing.focus}
+              row={viewingRow} busy={running} onTranscribe={setConfirm} onUntranscribe={untranscribe}
+              onClose={() => setViewing(null)} />
           </aside>
         </>
       )}
@@ -189,9 +214,11 @@ function IngestBanner({ ingest }: { ingest: IngestState }) {
   if (ingest.state === "running") {
     const total = ingest.total ?? 0;
     const pct = total ? Math.round(((ingest.done ?? 0) / total) * 100) : 0;
-    const label = ingest.stage === "embedding"
-      ? `Embedding ${ingest.done ?? 0} of ${total} chunks`
-      : ingest.stage === "reading" ? `Reading ${ingest.done ?? 0} of ${total} files` : "Starting…";
+    const label = ingest.stage === "transcribing"
+      ? `Claude is transcribing ${ingest.file ?? "the PDF"} - this can take a minute for long files`
+      : ingest.stage === "embedding"
+        ? `Embedding ${ingest.done ?? 0} of ${total} chunks`
+        : ingest.stage === "reading" ? `Reading ${ingest.done ?? 0} of ${total} files` : "Starting…";
     return (
       <div className="mt-4 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2.5 dark:border-indigo-900 dark:bg-indigo-950/40" role="status">
         <div className="flex items-center gap-2 text-sm text-indigo-800 dark:text-indigo-300">{Icon.spinner()} Indexing - {label}</div>
@@ -215,7 +242,12 @@ function IngestBanner({ ingest }: { ingest: IngestState }) {
   return null;
 }
 
-function EmptyFilesNotice({ docs, ocr, onReindex }: { docs: DocumentsResponse["documents"]; ocr: boolean; onReindex: () => void }) {
+function EmptyFilesNotice({ docs, ocr, onReindex, onTranscribe }: {
+  docs: DocumentsResponse["documents"];
+  ocr: boolean;
+  onReindex: () => void;
+  onTranscribe: (row: DocumentRow) => void;
+}) {
   const empty = docs.filter((d) => d.status === "empty");
   if (!empty.length) return null;
   const names = empty.map((d) => d.name).join(", ");
@@ -228,17 +260,17 @@ function EmptyFilesNotice({ docs, ocr, onReindex }: { docs: DocumentsResponse["d
           ? " This is most likely a scanned PDF: images of pages with no text layer."
           : " These are most likely scanned PDFs: images of pages with no text layer.")}
       </p>
-      {pdfs && (ocr ? (
-        <p className="mt-1.5">
-          Transcription is on.{" "}
-          <button onClick={onReindex} className="font-medium underline">Re-index</button> to transcribe {empty.length === 1 ? "it" : "them"} with Claude.
-        </p>
-      ) : (
-        <p className="mt-1.5">
-          To make them searchable, restart the server with <code className="rounded bg-red-100 px-1 dark:bg-red-900/50">RAG_OCR=1</code> and
-          re-index. Claude then transcribes scanned PDFs - each file is sent to the Anthropic API once.
-        </p>
-      ))}
+      {pdfs && (
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          {empty.filter((d) => d.type === "pdf").map((d) => (
+            <button key={d.name} onClick={() => onTranscribe(d)}
+              className="inline-flex max-w-full items-center gap-1.5 rounded-md bg-red-700 px-2.5 py-1 text-xs font-medium text-white hover:bg-red-800 dark:bg-red-800 dark:hover:bg-red-700">
+              {Icon.scan("h-3.5 w-3.5 shrink-0")} <span className="truncate">Transcribe {empty.length > 1 ? d.name : "with Claude"}</span>
+            </button>
+          ))}
+          {ocr && <span className="text-xs">or <button onClick={onReindex} className="font-medium underline">re-index</button> - automatic transcription is on.</span>}
+        </div>
+      )}
     </div>
   );
 }
@@ -267,12 +299,16 @@ function DropZone({ onFiles, busy }: { onFiles: (f: File[]) => void; busy: boole
   );
 }
 
-function FileTable({ docs, onView, onDelete, busy }: {
+function FileTable({ docs, onView, onDelete, onTranscribe, busy, compact = false }: {
   docs: DocumentsResponse["documents"];
   onView: (name: string) => void;
   onDelete: (name: string) => void;
+  onTranscribe: (row: DocumentRow) => void;
   busy: boolean;
+  compact?: boolean; // side panel open: drop the size and date columns
 }) {
+  const wide = compact ? "hidden" : "hidden md:table-cell";
+  const widest = compact ? "hidden" : "hidden xl:table-cell";
   const [confirming, setConfirming] = useState<string | null>(null);
   useEffect(() => {
     if (!confirming) return;
@@ -289,8 +325,8 @@ function FileTable({ docs, onView, onDelete, busy }: {
             <th className="w-full px-3 py-2 font-medium">Name</th>
             <th className="px-3 py-2 font-medium">Status</th>
             <th className="hidden px-3 py-2 text-right font-medium sm:table-cell">Chunks</th>
-            <th className="hidden px-3 py-2 text-right font-medium md:table-cell">Size</th>
-            <th className="hidden px-3 py-2 font-medium xl:table-cell">Modified</th>
+            <th className={`${wide} px-3 py-2 text-right font-medium`}>Size</th>
+            <th className={`${widest} px-3 py-2 font-medium`}>Modified</th>
             <th className="px-3 py-2"><span className="sr-only">Actions</span></th>
           </tr>
         </thead>
@@ -308,11 +344,20 @@ function FileTable({ docs, onView, onDelete, busy }: {
                 </td>
                 <td className="px-3 py-2.5">
                   <span className={`whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium ${st.cls}`} title={st.hint}>{st.label}</span>
+                  {d.transcribed && (
+                    <div className="mt-1 whitespace-nowrap text-[11px] text-zinc-500" title="Text written by Claude from the page images">Transcribed by Claude</div>
+                  )}
                 </td>
                 <td className="hidden px-3 py-2.5 text-right tabular-nums text-zinc-600 dark:text-zinc-400 sm:table-cell">{d.chunks || "-"}</td>
-                <td className="hidden whitespace-nowrap px-3 py-2.5 text-right tabular-nums text-zinc-600 dark:text-zinc-400 md:table-cell">{size(d.size)}</td>
-                <td className="hidden whitespace-nowrap px-3 py-2.5 text-zinc-600 dark:text-zinc-400 xl:table-cell">{when(d.modified)}</td>
+                <td className={`${wide} whitespace-nowrap px-3 py-2.5 text-right tabular-nums text-zinc-600 dark:text-zinc-400`}>{size(d.size)}</td>
+                <td className={`${widest} whitespace-nowrap px-3 py-2.5 text-zinc-600 dark:text-zinc-400`}>{when(d.modified)}</td>
                 <td className="whitespace-nowrap px-3 py-2.5 text-right">
+                  {d.status === "empty" && d.type === "pdf" && confirming !== d.name && (
+                    <button onClick={() => onTranscribe(d)} disabled={busy}
+                      className="mr-1 rounded-md border border-zinc-200 px-2 py-1 text-xs font-medium hover:bg-zinc-100 disabled:opacity-40 dark:border-zinc-700 dark:hover:bg-zinc-800">
+                      Transcribe
+                    </button>
+                  )}
                   {d.status !== "deleted" && (confirming === d.name ? (
                     <button onClick={() => { setConfirming(null); onDelete(d.name); }} disabled={busy}
                       className="rounded-md bg-red-600 px-2 py-1 text-xs font-medium text-white hover:bg-red-700 disabled:opacity-50">
@@ -431,18 +476,31 @@ function SearchTester({ reranker, onOpen }: { reranker: boolean; onOpen: (name: 
   );
 }
 
-function DocumentPanel({ name, focus, onClose }: { name: string; focus?: number; onClose: () => void }) {
+function DocumentPanel({ name, focus, row, busy, onTranscribe, onUntranscribe, onClose }: {
+  name: string;
+  focus?: number;
+  row?: DocumentRow;
+  busy: boolean;
+  onTranscribe: (row: DocumentRow) => void;
+  onUntranscribe: (name: string) => void;
+  onClose: () => void;
+}) {
   const [doc, setDoc] = useState<DocChunks | null>(null);
   const [error, setError] = useState<string | null>(null);
   const focusRef = useRef<HTMLDivElement>(null);
 
+  const noText = row !== undefined && row.chunks === 0;
   useEffect(() => {
     let live = true;
     setDoc(null);
     setError(null);
-    api.documentChunks(name).then((d) => live && setDoc(d)).catch((e) => live && setError(String(e.message ?? e)));
+    if (noText) {
+      setDoc({ name, doc_note: "", chunks: [] }); // nothing indexed to fetch
+    } else {
+      api.documentChunks(name).then((d) => live && setDoc(d)).catch((e) => live && setError(String(e.message ?? e)));
+    }
     return () => { live = false; };
-  }, [name]);
+  }, [name, noText]);
 
   useEffect(() => {
     // Block body: scrollIntoView may return a Promise, which React would treat as a cleanup.
@@ -455,7 +513,30 @@ function DocumentPanel({ name, focus, onClose }: { name: string; focus?: number;
         <div className="mt-0.5 text-zinc-400">{Icon.doc()}</div>
         <div className="min-w-0 flex-1">
           <div className="truncate text-sm font-semibold">{name}</div>
-          <div className="text-xs text-zinc-500">{doc ? `${doc.chunks.length} chunks` : " "}</div>
+          <div className="text-xs text-zinc-500">{doc ? `${doc.chunks.length} chunk${doc.chunks.length === 1 ? "" : "s"}` : " "}</div>
+          {row?.type === "pdf" && (
+            <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+              {row.transcribed ? (
+                <>
+                  <span className="rounded-full bg-violet-100 px-2 py-0.5 font-medium text-violet-800 dark:bg-violet-900/40 dark:text-violet-300">
+                    Text transcribed by Claude
+                  </span>
+                  <button onClick={() => onUntranscribe(name)} disabled={busy}
+                    className="text-zinc-600 underline hover:text-zinc-900 disabled:opacity-40 dark:text-zinc-400 dark:hover:text-zinc-100">
+                    Use the PDF's own text instead
+                  </button>
+                </>
+              ) : (
+                <>
+                  <span className="text-zinc-500">Text looks wrong or incomplete?</span>
+                  <button onClick={() => onTranscribe(row)} disabled={busy}
+                    className="inline-flex items-center gap-1 font-medium text-indigo-700 hover:underline disabled:opacity-40 dark:text-indigo-400">
+                    {Icon.scan("h-3.5 w-3.5")} Transcribe with Claude
+                  </button>
+                </>
+              )}
+            </div>
+          )}
         </div>
         <button onClick={onClose} aria-label="Close document"
           className="rounded p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800">{Icon.x()}</button>
@@ -463,6 +544,12 @@ function DocumentPanel({ name, focus, onClose }: { name: string; focus?: number;
       <div className="flex-1 space-y-3 overflow-y-auto p-4">
         {error && <p className="text-sm text-red-600">{error}</p>}
         {!doc && !error && <p className="text-sm text-zinc-500">Loading…</p>}
+        {doc && !doc.chunks.length && (
+          <p className="text-sm text-zinc-500">
+            No text could be extracted from this file, so it isn't searchable.
+            {row?.type === "pdf" && " It's most likely a scanned PDF - use Transcribe with Claude above."}
+          </p>
+        )}
         {doc?.doc_note && (
           <div className="rounded-lg bg-zinc-100 p-3 text-xs text-zinc-600 dark:bg-zinc-900 dark:text-zinc-400">
             <span className="font-medium">Document note</span> - shown to the model with every chunk: {doc.doc_note}
@@ -480,6 +567,44 @@ function DocumentPanel({ name, focus, onClose }: { name: string; focus?: number;
             <div className="whitespace-pre-wrap">{c.text}</div>
           </div>
         ))}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------- transcription consent
+
+function ConfirmTranscribe({ row, onCancel, onConfirm }: { row: DocumentRow; onCancel: () => void; onConfirm: () => void }) {
+  const confirmRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    confirmRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onCancel(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onCancel]);
+
+  const cost = row.transcribe_cost_usd ?? 0;
+  const costText = cost < 0.01 ? "less than $0.01" : `about $${cost.toFixed(2)}`;
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4" onClick={onCancel}>
+      <div role="dialog" aria-modal="true" aria-labelledby="transcribe-title" onClick={(e) => e.stopPropagation()}
+        className="w-full max-w-md rounded-xl border border-zinc-200 bg-white p-5 shadow-xl dark:border-zinc-800 dark:bg-zinc-900">
+        <h3 id="transcribe-title" className="text-base font-semibold">Send this file to Claude?</h3>
+        <p className="mt-2 break-words text-sm text-zinc-600 dark:text-zinc-400">
+          <span className="font-medium text-zinc-900 dark:text-zinc-100">{row.name}</span>
+          {row.pages ? ` (${row.pages} page${row.pages === 1 ? "" : "s"})` : ""} will be sent to the Anthropic API, where
+          Claude Haiku reads the page images and writes out the text. The transcription then replaces the PDF's own
+          text for search.
+        </p>
+        <ul className="mt-3 space-y-1 text-sm text-zinc-600 dark:text-zinc-400">
+          <li>• The whole file is sent, including any personal details in it.</li>
+          <li>• Estimated cost: {costText}.</li>
+          <li>• It's saved, so this file is only sent once. You can switch back to the PDF's own text later.</li>
+        </ul>
+        <div className="mt-5 flex justify-end gap-2">
+          <button onClick={onCancel} className={btnSecondary}>Cancel</button>
+          <button ref={confirmRef} onClick={onConfirm} className={btnPrimary}>{Icon.scan()} Transcribe</button>
+        </div>
       </div>
     </div>
   );

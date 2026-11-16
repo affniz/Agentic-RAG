@@ -272,15 +272,22 @@ class KnowledgeBase:
         manifest = self._manifest()
         return manifest.get("files", {}) if manifest.get("version") == INDEX_VERSION else {}
 
-    def ingest(self, docs_dir: str | Path, rebuild: bool = False, on_progress: ProgressFn | None = None) -> IngestReport:
+    def ingest(
+        self,
+        docs_dir: str | Path,
+        rebuild: bool = False,
+        on_progress: ProgressFn | None = None,
+        force: list[str] | tuple[str, ...] = (),
+    ) -> IngestReport:
         """Sync the index with `docs_dir`: embed new/changed files, drop deleted ones.
 
+        force: files (relative paths) to re-read even if unchanged, e.g. after transcribing one.
         Searches keep working during an ingest and see the old index until the new one is swapped in.
         """
         with self._ingest_lock:
-            return self._ingest(Path(docs_dir), rebuild, on_progress or (lambda *_: None))
+            return self._ingest(Path(docs_dir), rebuild, on_progress or (lambda *_: None), set(force))
 
-    def _ingest(self, docs_dir: Path, rebuild: bool, progress: ProgressFn) -> IngestReport:
+    def _ingest(self, docs_dir: Path, rebuild: bool, progress: ProgressFn, force: set[str]) -> IngestReport:
         manifest = self._manifest()
         kept = list(self.chunks)
         if rebuild or manifest.get("version") != INDEX_VERSION:
@@ -298,7 +305,8 @@ class KnowledgeBase:
         added = [r for r in current if r not in old_hashes]
         updated = [r for r in current if r in old_hashes and old_hashes[r] != new_hashes[r]]
         removed = [r for r in old_hashes if r not in current]
-        stale = set(updated) | set(removed)
+        forced = sorted(r for r in force if r in current and r not in added and r not in updated)
+        stale = set(updated) | set(removed) | set(forced)
 
         if stale:
             self._col.delete(where={"source": {"$in": sorted(stale)}})
@@ -310,7 +318,7 @@ class KnowledgeBase:
         with_chunks = {c.source for c in kept}
         retry = [r for r in current if r not in with_chunks and r not in stale and r not in added
                  and self.pdf_ocr is not None and r.lower().endswith(".pdf")]
-        to_read = added + updated + retry
+        to_read = added + updated + forced + retry
         empty: list[str] = []
         for n, rel in enumerate(to_read):
             progress("reading", n, len(to_read))
@@ -334,23 +342,55 @@ class KnowledgeBase:
         _write_atomic(self._chunks_file, json.dumps([asdict(c) for c in chunks]))
         _write_atomic(self._manifest_file, json.dumps({"version": INDEX_VERSION, "files": new_hashes}))
         self._index = _Index.build(chunks)  # atomic swap
-        return IngestReport(added, updated, removed, len(current) - len(added) - len(updated), len(chunks), empty)
+        reprocessed = updated + forced
+        return IngestReport(added, reprocessed, removed, len(current) - len(added) - len(reprocessed), len(chunks), empty)
+
+    # -- transcriptions (PDF text written by Claude, see rag/ocr.py)
+
+    def _transcription_file(self, digest: str) -> Path:
+        return self.index_dir / "ocr" / f"{digest}.md"
+
+    def has_transcription(self, path: Path) -> bool:
+        return self._transcription_file(_file_hash(path)).exists()
+
+    def transcribe(self, path: Path, ocr: Callable[[Path], str]) -> bool:
+        """Transcribe one PDF and save the result; it is used instead of the PDF's own text from the
+        next ingest of that file on. Returns False if no text came back."""
+        text = ocr(path)
+        if not text.strip():
+            return False
+        cache = self._transcription_file(_file_hash(path))
+        cache.parent.mkdir(exist_ok=True)
+        _write_atomic(cache, text)
+        return True
+
+    def clear_transcription(self, path: Path) -> bool:
+        """Go back to the PDF's own text layer from the next ingest of that file on."""
+        cache = self._transcription_file(_file_hash(path))
+        if not cache.exists():
+            return False
+        cache.unlink()
+        return True
 
     def _extract(self, path: Path, digest: str) -> tuple[str, bool]:
-        """(text, is_markdown) for one file, using the OCR fallback for scanned PDFs if configured."""
-        text = _read(path)
+        """(text, is_markdown) for one file.
+
+        A saved transcription always wins for a PDF. Without one, a PDF with no text layer is
+        transcribed automatically only if `pdf_ocr` is configured.
+        """
         if path.suffix.lower() != ".pdf":
-            return text, path.suffix.lower() == ".md"
-        if not _lacks_text_layer(path, text) or self.pdf_ocr is None:
-            return text, False
-        cache = self.index_dir / "ocr" / f"{digest}.md"
+            return _read(path), path.suffix.lower() == ".md"
+        cache = self._transcription_file(digest)
         if cache.exists():
             return cache.read_text(), True
-        text = self.pdf_ocr(path)
-        if text.strip():
+        text = _read(path)
+        if not _lacks_text_layer(path, text) or self.pdf_ocr is None:
+            return text, False
+        new = self.pdf_ocr(path)
+        if new.strip():
             cache.parent.mkdir(exist_ok=True)
-            _write_atomic(cache, text)
-        return text, True
+            _write_atomic(cache, new)
+        return new, True
 
     # -- retrieval
 

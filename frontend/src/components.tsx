@@ -25,6 +25,7 @@ export const Icon = {
   refresh: (c?: string) => svg(<path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7" />, c),
   chat: (c?: string) => svg(<path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z" />, c),
   folder: (c?: string) => svg(<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />, c),
+  scan: (c?: string) => svg(<path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3M7 12h10" />, c),
   trash: (c?: string) => svg(<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3" />, c),
   spinner: (c = "h-4 w-4") => (
     <svg viewBox="0 0 24 24" className={`${c} animate-spin`} aria-hidden>

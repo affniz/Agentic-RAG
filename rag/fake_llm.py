@@ -95,4 +95,11 @@ def _compose(result: str) -> str:
     return "\n".join(lines)
 
 
+
+def demo_transcriber(path: Any) -> str:
+    """Demo-mode stand-in for rag.ocr.claude_pdf_transcriber: no API call."""
+    return (f"# Demo transcription of {path.name}\n\nDemo mode: no model was called. With an API key, Claude "
+            "would transcribe the text of this PDF here.")
+
+
 usage = _usage
