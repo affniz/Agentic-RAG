@@ -1,7 +1,14 @@
 import type {
-  ChatEvent, ChunkView, ConversationSummary, DocChunks, DocumentsResponse, Health, IngestState,
-  SearchResponse, Turn, UploadResponse,
+  ChatEvent, ChunkView, ConversationSummary, DocChunks, DocumentsResponse, Estimate, EvalJob, EvalRequest, EvalRow,
+  EvalRun, EvalSet, ExportResult, Feedback, FeedbackRecord, Health, IngestState, SearchResponse, Settings, Turn,
+  UploadResponse,
 } from "./types";
+
+const send = (method: string, body?: unknown): RequestInit => ({
+  method,
+  headers: { "Content-Type": "application/json" },
+  body: body === undefined ? undefined : JSON.stringify(body),
+});
 
 const path = (name: string) => name.split("/").map(encodeURIComponent).join("/");
 
@@ -16,6 +23,22 @@ export const api = {
   conversation: (id: string) =>
     fetch(`/api/conversations/${id}`).then(json<ConversationSummary & { messages: Turn[] }>),
   deleteConversation: (id: string) => fetch(`/api/conversations/${id}`, { method: "DELETE" }).then(json),
+  resetConversations: () => fetch("/api/conversations", { method: "DELETE" }).then(json<{ kept_busy: number }>),
+  settings: () => fetch("/api/settings").then(json<Settings>),
+  saveSettings: (s: Settings) => fetch("/api/settings", send("PUT", s)).then(json<Settings>),
+  feedback: (turnId: string, conversationId: string, rating: Feedback["rating"] | null, comment = "") =>
+    fetch(`/api/feedback/${turnId}`, send("PUT", { conversation_id: conversationId, rating, comment }))
+      .then(json<{ feedback: Feedback | null }>),
+  feedbackList: () => fetch("/api/feedback").then(json<FeedbackRecord[]>),
+  exportFeedback: () => fetch("/api/feedback/export", send("POST")).then(json<ExportResult>),
+
+  evalSets: () => fetch("/api/evals/sets").then(json<EvalSet[]>),
+  evalRuns: () => fetch("/api/evals/runs").then(json<EvalRun[]>),
+  evalRun: (file: string) => fetch(`/api/evals/runs/${encodeURIComponent(file)}`).then(json<{ summary: EvalRun; rows: EvalRow[] }>),
+  estimate: (r: EvalRequest) => fetch("/api/evals/estimate", send("POST", r)).then(json<Estimate>),
+  startEval: (r: EvalRequest) => fetch("/api/evals/run", send("POST", r)).then(json<EvalJob>),
+  evalJob: () => fetch("/api/evals/job").then(json<EvalJob>),
+  cancelEval: () => fetch("/api/evals/job/cancel", send("POST")).then(json<EvalJob>),
   chunk: (source: string, index: number) => fetch(`/api/chunks/${path(source)}/${index}`).then(json<ChunkView>),
 
   documents: () => fetch("/api/documents").then(json<DocumentsResponse>),
@@ -40,7 +63,7 @@ export const api = {
 
 /** POST a question and yield Server-Sent Events as they arrive. */
 export async function* streamChat(
-  body: { message: string; conversation_id?: string | null; model?: string; effort?: string },
+  body: { message: string; conversation_id?: string | null },
   signal?: AbortSignal,
 ): AsyncGenerator<ChatEvent> {
   const res = await fetch("/api/chat", {

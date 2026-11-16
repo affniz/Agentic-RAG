@@ -137,7 +137,7 @@ def main() -> None:
 
 
 def run_eval(args: argparse.Namespace, model: str) -> None:
-    from rag.evaluate import JUDGE_MODEL, answer_eval, load_set, retrieval_eval, set_knowledge_base
+    from rag.evaluate import JUDGE_MODEL, answer_eval, load_set, retrieval_eval, save_retrieval_run, set_knowledge_base
 
     es = load_set(args.set)
     questions = [q for q in es.questions if not args.category or q.get("category") == args.category][: args.limit]
@@ -146,7 +146,9 @@ def run_eval(args: argparse.Namespace, model: str) -> None:
           f"{len(kb.chunks)} chunks{f', today={es.today}' if es.today else ''}")
 
     print(f"\nSingle-query retrieval with the question text (k={args.k}):")
-    for name, m in retrieval_eval(kb, questions, k=args.k).items():
+    metrics = retrieval_eval(kb, questions, k=args.k)
+    save_retrieval_run(es.name, args.k, metrics, len(questions))
+    for name, m in metrics.items():
         extra = f"  ({m['note']})" if "note" in m else ""
         print(f"  {name:<15} recall@k={m['recall@k']:.2f}  hit@k={m['hit@k']:.2f}  mrr={m['mrr']:.2f}{extra}")
     if not args.answers:
@@ -156,7 +158,7 @@ def run_eval(args: argparse.Namespace, model: str) -> None:
     print(f"\nAnswers ({model}, effort={args.effort}, systems={','.join(systems)}):")
     s = answer_eval(kb, questions, model=model, effort=args.effort, systems=systems, today=es.today,
                     naive_k=args.naive_k, judge_model=args.judge_model or JUDGE_MODEL,
-                    workers=args.workers, label=es.name, repeats=args.repeats)
+                    workers=args.workers, label=es.name, set_name=es.name, repeats=args.repeats)
 
     res = s["systems"]
     pct = lambda v: "n/a" if v is None else f"{v:.0%}"

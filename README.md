@@ -23,7 +23,8 @@ question ─► Claude (claude-haiku-5-5) ──tool calls──► list_documen
 | `rag/baseline.py` | One-shot RAG baseline (retrieve once, answer once) for comparison |
 | `evals/basic`, `evals/hard` | Eval sets: questions with evidence snippets, expected sources and reference answers, plus the hard set's own documents |
 | `main.py` | CLI |
-| `server/app.py` | FastAPI backend for the web UI: streaming chat over Server-Sent Events, conversations, chunk lookup for citations |
+| `server/app.py` | FastAPI backend for the web UI: streaming chat over Server-Sent Events, conversations, chunk lookup for citations, settings, feedback |
+| `server/documents.py`, `server/evals.py`, `server/feedback.py` | Documents API; eval runner (background jobs, cost estimate, run history); settings and feedback storage and export |
 | `frontend/` | React + Vite + Tailwind chat UI |
 | `rag/fake_llm.py` | Stand-in Claude client for tests and for running the UI with no API key (demo mode) |
 | `tests/` | pytest suite (no API key needed) |
@@ -57,9 +58,13 @@ python main.py chat                        # multi-turn; /reset, /cost, /quit
 
 ![Chat UI with a cited answer and the source panel open](assets/screenshot.png)
 
-Streaming answers, a live trace of the agent's searches, numbered citation chips that open the
-cited chunk (with its neighbours) in a side panel, per-answer cost, model/effort pickers, and a
-conversation list. Works on mobile and in dark mode.
+Four screens, all in the sidebar. Works on mobile and in dark mode.
+
+**Chat** - streaming answers; a collapsible trace of the agent's steps ("Searched 'carry over' → 3 results",
+"Read benefits.md #3-5"); numbered citation chips that open the cited chunk with its section path and
+neighbours in a side panel; estimated cost, API calls and time under each answer; 👍/👎 buttons (a 👎
+asks what the answer should have been); a conversation list with **New chat** and **Reset** (deletes all
+conversations, keeps feedback).
 
 The **Documents** screen (sidebar, or `/#/documents`) manages the knowledge base without the CLI:
 drag-and-drop upload of `.md` / `.txt` / `.pdf` (indexed automatically), a status per file
@@ -73,13 +78,27 @@ cd frontend && npm install && npm run build && cd ..   # once, and after fronten
 python -m uvicorn server.app:app --port 8000           # then open http://localhost:8000
 ```
 
+The **Evals** screen (`/#/evals`) runs the eval sets from the browser: the retrieval eval (free) or the
+answer eval, which first shows an estimated cost (from your last run with the same model, or a rough
+token estimate) and runs only after you confirm, with live progress, spend so far and a Stop button.
+A chart plots accuracy (or retrieval recall) across past runs of the selected set, so you can see whether
+a change helped; click a run for per-question verdicts, the judge's reasoning and the full answer.
+**Feedback from chat** collects the 👍/👎 answers; **Export as eval set** writes them to `evals/feedback/`
+(a 👍 answer becomes the reference answer; a 👎 needs its correction to become one). Review that file
+before relying on it: a 👍 only means the answer looked right.
+
+The **Settings** screen (`/#/settings`) sets the model, effort, results per search (or let the model
+choose), reranking and the step limit. They apply to chat from the next question and to answer evals,
+so an eval measures what you get in chat. Each run records the settings it used.
+
 - **Demo mode:** `RAG_FAKE_LLM=1 python -m uvicorn server.app:app` runs the whole UI with real search but a
   fake model: no API key, no cost. Handy for UI work.
 - **Frontend dev with hot reload:** run the server as above, then `cd frontend && npm run dev` and open
   http://localhost:5173 (API calls are proxied to :8000).
 - **Scanned PDFs** (images of pages, no text layer) can't be read by the text extractor; they show as "No text found". Click **Transcribe** on the file (or **Transcribe with Claude** in the document viewer, which also works for PDFs whose text layer is junk): after a confirmation showing what's sent and the estimated cost, Claude Haiku transcribes the page images and the file is re-indexed. Each file is sent once (the transcription is cached in the index folder), and "Use the PDF's own text instead" undoes it. To transcribe text-less PDFs automatically - e.g. a large folder - start the server with `RAG_OCR=1` or run `python main.py ingest --ocr`.
-- Other settings: `RAG_DOCS` (documents folder, default `./docs`), `RAG_INDEX` (index directory), `RAG_RERANK=0` (turn off the reranker).
-- Conversations are kept in memory for now and are lost when the server restarts.
+- Other settings: `RAG_DOCS` (documents folder, default `./docs`), `RAG_INDEX` (index directory), `RAG_RERANK=0` (turn off the reranker), `RAG_DATA` (settings, feedback and eval-set indexes, default `./.rag_data`), `RAG_EVALS` (eval sets and results, default `./evals`).
+- Conversations are kept in memory for now and are lost when the server restarts; settings and feedback are saved in `RAG_DATA`.
+- In demo mode the eval dashboard works too, with a keyword-matching stand-in judge: free, but the scores mean nothing.
 
 ## Evaluation
 
@@ -128,6 +147,7 @@ see `Chunk.render()`. That took date-dependent questions from 83% to 100% for *b
 `agentic-v1` without it): it improved evidence retrieval (83% → 95% on `evals/past-dates`) and
 citations, but not accuracy (86% for both).
 
+Every run is saved to `evals/results/` (retrieval runs too), which is what the dashboard's chart reads.
 Answers are graded by a `claude-haiku-5-5` judge against reference answers (`--judge-model` to change),
 and results are saved to `evals/results/`. Other flags: `--category multi_hop`, `--limit N`, `--workers N`, and `--repeats N` - run everything N times and report the mean, the min-max range across runs and the questions whose verdict changed. On these sets one run flips about one answer, so use `--repeats 3` before trusting a difference of a question or two.
 
@@ -136,7 +156,7 @@ Rough cost for the hard set (estimates): Haiku, both systems ≈ $0.15; Sonnet, 
 ## Tests
 
 ```bash
-pip install -r requirements-dev.txt && pytest -q   # 30 tests, no API key needed
+pip install -r requirements-dev.txt && pytest -q   # 36 tests, no API key needed
 ```
 
 ## Settings worth knowing

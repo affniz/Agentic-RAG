@@ -94,6 +94,7 @@ def make_router(kb: KnowledgeBase, docs_dir: Path, transcriber: Callable[[], Tra
         # still sees "running" and polls again, instead of pairing "done" with a stale list.
         ingest_state = dict(job.state)
         indexed = kb.indexed_files()
+        indexed_at = kb.indexed_times()
         counts = kb.sources()
         rows = []
         for path in sorted(docs_dir.rglob("*")):
@@ -108,12 +109,12 @@ def make_router(kb: KnowledgeBase, docs_dir: Path, transcriber: Callable[[], Tra
             is_pdf = path.suffix.lower() == ".pdf"
             pages = _pdf_pages(path) if is_pdf else None
             rows.append({"name": rel, "type": path.suffix.lower().lstrip("."), "size": stat.st_size,
-                         "modified": stat.st_mtime, "chunks": counts.get(rel, 0), "status": status,
+                         "modified": stat.st_mtime, "indexed_at": indexed_at.get(rel), "chunks": counts.get(rel, 0), "status": status,
                          "pages": pages, "transcribed": is_pdf and kb.has_transcription(path),
                          "transcribe_cost_usd": round((pages or 1) * EST_USD_PER_PAGE, 4) if is_pdf else None})
         on_disk = {r["name"] for r in rows}
         rows += [{"name": rel, "type": Path(rel).suffix.lstrip("."), "size": None, "modified": None,
-                  "chunks": counts.get(rel, 0), "status": "deleted", "pages": None, "transcribed": False,
+                  "indexed_at": indexed_at.get(rel), "chunks": counts.get(rel, 0), "status": "deleted", "pages": None, "transcribed": False,
                   "transcribe_cost_usd": None} for rel in sorted(indexed) if rel not in on_disk]
         return {"documents": rows, "chunks": len(kb.chunks), "ingest": ingest_state, "ocr": kb.pdf_ocr is not None,
                 "needs_ingest": any(r["status"] not in ("indexed", "empty") for r in rows)}

@@ -122,3 +122,9 @@ def test_repeats_report_mean_range_and_unstable(kb, tmp_path):
     assert r["by_category"]["c"]["range"] == (0.5, 1.0)
     assert r["by_category"]["c"]["n"] == 2
     assert r["unstable"] == ["q1"]
+
+
+def test_estimate_without_history_is_rough(tmp_path):
+    from server.evals import _price, ROUGH_TOKENS
+
+    assert 0.0005 < _price("claude-haiku-5-5", ROUGH_TOKENS["agentic"]) < 0.002

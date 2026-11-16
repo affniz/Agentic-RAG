@@ -203,3 +203,21 @@ def test_manual_transcribe_and_undo(tmp_path):
     kb.ingest(docs, force=["card.pdf"])
     assert "WATERMARK" in kb.get_chunks("card.pdf", 0, 0)[0].text
     assert not kb.transcribe(docs / "card.pdf", lambda p: "  ")  # nothing returned -> nothing saved
+
+
+def test_indexed_times_only_change_for_reread_files(tmp_path):
+    import time
+
+    d = tmp_path / "docs"
+    d.mkdir()
+    (d / "a.md").write_text("# A\nalpha")
+    (d / "b.md").write_text("# B\nbeta")
+    kb = KnowledgeBase(tmp_path / "idx", rerank=False)
+    kb.ingest(d)
+    first = kb.indexed_times()
+    assert set(first) == {"a.md", "b.md"}
+    time.sleep(0.01)
+    (d / "b.md").write_text("# B\nbeta changed")
+    kb.ingest(d)
+    second = kb.indexed_times()
+    assert second["a.md"] == first["a.md"] and second["b.md"] > first["b.md"]

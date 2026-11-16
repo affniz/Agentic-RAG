@@ -4,6 +4,7 @@ export type Step = {
   args: Record<string, unknown>;
   status: "running" | "done" | "error";
   chars?: number;
+  results?: number | null;
 };
 
 export type Citation = { source: string; index: number; section: string | null; found: boolean };
@@ -16,7 +17,10 @@ export type Usage = {
   api_calls: number;
 };
 
+export type Feedback = { rating: "up" | "down"; comment: string };
+
 export type Turn = {
+  id?: string;
   role: "user" | "assistant";
   text: string;
   steps: Step[];
@@ -25,6 +29,8 @@ export type Turn = {
   cost_usd: number | null;
   seconds: number | null;
   stop: string | null;
+  model?: string | null;
+  feedback?: Feedback | null;
   streaming?: boolean;
 };
 
@@ -44,7 +50,18 @@ export type Health = {
   models: string[];
   demo_mode: boolean;
   reranker: boolean;
+  reranker_configured: boolean;
   ocr: boolean;
+};
+
+export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
+
+export type Settings = {
+  model: string;
+  effort: Effort;
+  search_k: number | null;
+  rerank: boolean;
+  max_steps: number;
 };
 
 export type ChunkView = {
@@ -55,10 +72,10 @@ export type ChunkView = {
 };
 
 export type ChatEvent =
-  | ({ type: "conversation" } & ConversationSummary)
+  | ({ type: "conversation"; turn_id: string } & ConversationSummary)
   | { type: "text_delta"; text: string }
   | { type: "tool_call"; id: string; name: string; args: Record<string, unknown> }
-  | { type: "tool_result"; id: string; name: string; is_error: boolean; chars: number }
+  | { type: "tool_result"; id: string; name: string; is_error: boolean; chars: number; results?: number }
   | { type: "answer"; text: string; stop: string; citations: Citation[] }
   | { type: "usage"; usage: Usage; cost_usd: number | null }
   | { type: "error"; message: string }
@@ -71,6 +88,7 @@ export type DocumentRow = {
   type: string;
   size: number | null;
   modified: number | null;
+  indexed_at: number | null;
   chunks: number;
   status: DocStatus;
   pages: number | null;
@@ -118,3 +136,118 @@ export type SearchResult = {
 export type SearchResponse = { query: string; mode: string; reranked: boolean; ms: number; results: SearchResult[] };
 
 export type DocChunks = { name: string; doc_note: string; chunks: { index: number; section: string; text: string }[] };
+
+// ---------------------------------------------------------------- evals
+
+export type EvalSystem = "agentic" | "agentic-v1" | "naive";
+
+export type EvalSet = { name: string; questions: number; categories: Record<string, number>; description: string; docs_found: boolean };
+
+export type SystemSummary = {
+  correct: number;
+  partially_correct: number;
+  by_category: Record<string, { n: number; correct: number; range?: [number, number] }>;
+  cited_expected_sources: number | null;
+  evidence_recall: number | null;
+  avg_tool_calls: number;
+  avg_api_calls: number;
+  avg_seconds: number;
+  cost_usd: number;
+  judge_cost_usd: number;
+  runs?: number;
+  range?: Record<string, [number, number]>;
+  unstable?: string[];
+};
+
+export type RetrievalMetrics = { "recall@k": number; "hit@k": number; mrr: number; note?: string };
+
+export type EvalRun = {
+  file: string;
+  kind: "answers" | "retrieval";
+  set: string | null;
+  created_at: number;
+  questions: number;
+  // answers
+  model?: string;
+  effort?: string;
+  repeats?: number;
+  naive_k?: number;
+  judge_model?: string;
+  max_steps?: number;
+  search_k?: number | null;
+  rerank?: boolean;
+  systems?: Record<string, SystemSummary>;
+  // retrieval
+  k?: number;
+  configs?: Record<string, RetrievalMetrics>;
+};
+
+export type EvalRow = {
+  id: string;
+  category: string;
+  system: string;
+  run: number;
+  question: string;
+  answer: string;
+  verdict: "correct" | "partially_correct" | "incorrect";
+  judge_reasoning: string;
+  cited_expected_sources: boolean | null;
+  evidence_recall: number | null;
+  tool_calls: number;
+  api_calls: number;
+  cost_usd: number;
+  seconds: number;
+  stop: string;
+};
+
+export type EvalRequest = {
+  kind: "retrieval" | "answers";
+  set: string;
+  systems?: EvalSystem[];
+  model?: string;
+  effort?: Effort;
+  limit?: number | null;
+  repeats?: number;
+  naive_k?: number;
+};
+
+export type Estimate = {
+  total_usd: number;
+  questions: number;
+  answers: number;
+  per_system: Record<string, number>;
+  judge_usd: number;
+  api_calls: number;
+  basis: "history" | "rough" | "demo" | "free";
+  model?: string;
+};
+
+export type EvalJob = {
+  state: "idle" | "running" | "done" | "error" | "cancelled";
+  stage?: string;
+  kind?: "retrieval" | "answers";
+  set?: string;
+  model?: string | null;
+  done?: number;
+  total?: number;
+  cost_usd?: number;
+  started_at?: number;
+  finished_at?: number;
+  result_file?: string;
+  error?: string;
+};
+
+export type FeedbackRecord = {
+  turn_id: string;
+  conversation_id: string;
+  rating: "up" | "down";
+  comment: string;
+  question: string;
+  answer: string;
+  model: string | null;
+  followup: boolean;
+  created_at: number;
+  updated_at: number;
+};
+
+export type ExportResult = { path: string; questions: number; skipped: { id: string; question: string; reason: string }[] };
