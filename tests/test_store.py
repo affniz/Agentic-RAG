@@ -221,3 +221,62 @@ def test_indexed_times_only_change_for_reread_files(tmp_path):
     kb.ingest(d)
     second = kb.indexed_times()
     assert second["a.md"] == first["a.md"] and second["b.md"] > first["b.md"]
+
+
+def _text_pdf(path, text, user_password=None):
+    """A one-page PDF with real text, AES-256 encrypted when user_password is given ("" = opens without one)."""
+    from pypdf import PdfWriter
+    from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+
+    w = PdfWriter()
+    page = w.add_blank_page(width=612, height=792)
+    font = DictionaryObject({NameObject("/Type"): NameObject("/Font"), NameObject("/Subtype"): NameObject("/Type1"),
+                             NameObject("/BaseFont"): NameObject("/Helvetica")})
+    page[NameObject("/Resources")] = DictionaryObject(
+        {NameObject("/Font"): DictionaryObject({NameObject("/F1"): w._add_object(font)})})
+    stream = DecodedStreamObject()
+    stream.set_data(f"BT /F1 12 Tf 72 720 Td ({text}) Tj ET".encode())
+    page[NameObject("/Contents")] = w._add_object(stream)
+    if user_password is not None:
+        w.encrypt(user_password=user_password, owner_password="owner", algorithm="AES-256")
+    with open(path, "wb") as f:
+        w.write(f)
+
+
+def test_aes_encrypted_pdf_without_password_is_indexed(tmp_path):
+    docs = make_docs(tmp_path)
+    _text_pdf(docs / "card.pdf", "Exam centre is Hall B, report by nine in the morning.", user_password="")
+    kb = KnowledgeBase(tmp_path / "idx", rerank=False)
+    r = kb.ingest(docs)
+    assert r.failed == {} and "card.pdf" in r.added
+    assert "Hall B" in kb.get_chunks("card.pdf", 0, 0)[0].text
+
+
+def test_unreadable_file_is_skipped_not_fatal(tmp_path):
+    docs = make_docs(tmp_path)
+    _text_pdf(docs / "locked.pdf", "Secret contents that need a password to open.", user_password="hunter2")
+    kb = KnowledgeBase(tmp_path / "idx", rerank=False)
+    r = kb.ingest(docs)
+    assert set(r.failed) == {"locked.pdf"} and "password-protected" in r.failed["locked.pdf"]
+    assert "locked.pdf" not in r.added and "locked.pdf" not in kb.indexed_files()
+    assert kb.sources() and "locked.pdf" not in kb.sources()  # everything else was indexed
+    assert kb.index_errors() == r.failed
+    assert set(kb.ingest(docs).failed) == {"locked.pdf"}  # retried, still failing
+    (docs / "locked.pdf").unlink()
+    assert kb.ingest(docs).failed == {} and kb.index_errors() == {}
+
+
+def test_missing_crypto_dependency_says_what_to_install(tmp_path, monkeypatch):
+    from pypdf.errors import DependencyError
+
+    import rag.store as store
+
+    docs = make_docs(tmp_path)
+    _text_pdf(docs / "card.pdf", "Exam centre is Hall B, report by nine in the morning.", user_password="")
+
+    def fail(path):
+        raise DependencyError("cryptography>=3.1 is required for AES algorithm")
+
+    monkeypatch.setattr(store, "_read", fail)
+    r = KnowledgeBase(tmp_path / "idx", rerank=False).ingest(docs)
+    assert "cryptography" in r.failed["card.pdf"] and "pip install" in r.failed["card.pdf"]

@@ -98,6 +98,7 @@ models without touching chat. Each run records the settings it used.
 - **Frontend dev with hot reload:** run the server as above, then `cd frontend && npm run dev` and open
   http://localhost:5173 (API calls are proxied to :8000).
 - **Scanned PDFs** (images of pages, no text layer) can't be read by the text extractor; they show as "No text found". Click **Transcribe** on the file (or **Transcribe with Claude** in the document viewer, which also works for PDFs whose text layer is junk): after a confirmation showing what's sent and the estimated cost, Claude Haiku transcribes the page images and the file is re-indexed. Each file is sent once (the transcription is cached in the index folder), and "Use the PDF's own text instead" undoes it. To transcribe text-less PDFs automatically - e.g. a large folder - start the server with `RAG_OCR=1` or run `python main.py ingest --ocr`.
+- **Encrypted PDFs** that open without a password (common for official documents) are read normally. A PDF that needs a password, or any file that can't be read, is skipped with the reason shown in the Documents table; the rest of the folder is still indexed.
 - Other settings: `RAG_DOCS` (documents folder, default `./docs`), `RAG_INDEX` (index directory), `RAG_RERANK=0` (turn off the reranker), `RAG_DATA` (settings, feedback and eval-set indexes, default `./.rag_data`), `RAG_EVALS` (eval sets and results, default `./evals`).
 - Conversations are kept in memory for now and are lost when the server restarts; settings and feedback are saved in `RAG_DATA`.
 - In demo mode the eval dashboard works too, with a keyword-matching stand-in judge: free, but the scores mean nothing.
@@ -158,7 +159,7 @@ Rough cost for the hard set (estimates): Haiku, both systems ≈ $0.15; Sonnet, 
 ## Tests
 
 ```bash
-pip install -r requirements-dev.txt && pytest -q   # 36 tests, no API key needed
+pip install -r requirements-dev.txt && pytest -q   # 41 tests, no API key needed
 ```
 
 ## Settings worth knowing

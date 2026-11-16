@@ -120,3 +120,17 @@ def test_transcribe_and_undo_one_pdf(client):
     assert statuses(c)["scan.pdf"] == "empty"
     assert c.delete("/api/documents/scan.pdf/transcription").status_code == 404  # nothing to undo
     assert c.post("/api/documents/vacation.md/transcribe").status_code == 404  # PDFs only
+
+
+def test_unreadable_pdf_shows_error_status(client):
+    from tests.test_store import _text_pdf
+
+    _text_pdf(client.docs / "locked.pdf", "Secret contents that need a password to open.", user_password="pw")
+    client.post("/api/ingest", json={})
+    st = wait_ingest(client)
+    assert st["state"] == "done" and "password-protected" in st["report"]["failed"]["locked.pdf"]
+    body = client.get("/api/documents").json()
+    row = next(d for d in body["documents"] if d["name"] == "locked.pdf")
+    assert row["status"] == "error" and "password-protected" in row["error"]
+    assert body["needs_ingest"] is False  # re-indexing again won't help; the reason says what will
+    assert next(d for d in body["documents"] if d["name"] == "vacation.md")["status"] == "indexed"

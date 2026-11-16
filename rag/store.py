@@ -15,6 +15,7 @@ from typing import Callable
 import chromadb
 from chromadb.utils import embedding_functions
 from pypdf import PdfReader
+from pypdf.errors import DependencyError, FileNotDecryptedError
 from rank_bm25 import BM25Plus
 
 SUPPORTED = {".md", ".txt", ".pdf"}
@@ -55,6 +56,7 @@ class IngestReport:
     unchanged: int
     chunks: int
     empty: list[str] = field(default_factory=list)  # files that yielded no text (e.g. scanned PDFs)
+    failed: dict[str, str] = field(default_factory=dict)  # files that couldn't be read: {name: reason}
 
 
 # ---------------------------------------------------------------- loading & chunking
@@ -64,6 +66,15 @@ def _read(path: Path) -> str:
     if path.suffix.lower() == ".pdf":
         return "\n\n".join(page.extract_text() or "" for page in PdfReader(path).pages)
     return path.read_text(encoding="utf-8", errors="replace")
+
+
+def _read_error(path: Path, e: Exception) -> str:
+    """A short, actionable reason a file couldn't be read."""
+    if isinstance(e, DependencyError):
+        return "This PDF is encrypted. Install the 'cryptography' package (pip install -r requirements.txt) and re-index."
+    if isinstance(e, FileNotDecryptedError):
+        return "This PDF is password-protected. Remove the password (e.g. print it to a new PDF) and upload it again."
+    return f"Couldn't read this file: {type(e).__name__}: {e}"
 
 
 def _lacks_text_layer(path: Path, text: str) -> bool:
@@ -273,6 +284,11 @@ class KnowledgeBase:
         manifest = self._manifest()
         return manifest.get("files", {}) if manifest.get("version") == INDEX_VERSION else {}
 
+    def index_errors(self) -> dict[str, str]:
+        """{relative path: reason} for files the last ingest couldn't read."""
+        manifest = self._manifest()
+        return manifest.get("errors", {}) if manifest.get("version") == INDEX_VERSION else {}
+
     def indexed_times(self) -> dict[str, float]:
         """{relative path: unix time} each file was last (re-)read into the index."""
         manifest = self._manifest()
@@ -326,10 +342,16 @@ class KnowledgeBase:
                  and self.pdf_ocr is not None and r.lower().endswith(".pdf")]
         to_read = added + updated + forced + retry
         empty: list[str] = []
+        failed: dict[str, str] = {}
         for n, rel in enumerate(to_read):
             progress("reading", n, len(to_read))
             path = current[rel]
-            text, markdown = self._extract(path, new_hashes[rel])
+            try:
+                text, markdown = self._extract(path, new_hashes[rel])
+            except Exception as e:  # one unreadable file must not stop the rest from being indexed
+                failed[rel] = _read_error(path, e)
+                print(f"[ingest] skipped {rel}: {failed[rel]}", file=sys.stderr)
+                continue
             doc_chunks = chunk_document(rel, text, markdown=markdown)
             if not doc_chunks:
                 empty.append(rel)
@@ -346,14 +368,18 @@ class KnowledgeBase:
 
         chunks = sorted(kept + fresh, key=lambda c: (c.source, c.index))
         _write_atomic(self._chunks_file, json.dumps([asdict(c) for c in chunks]))
+        # Failed files stay out of the manifest, so they're retried on every ingest until they read.
+        for rel in failed:
+            new_hashes.pop(rel)
         now = time.time()
         old_times: dict[str, float] = manifest.get("indexed_at", {})
-        times = {rel: now if rel in to_read or rel not in old_times else old_times[rel] for rel in current}
-        _write_atomic(self._manifest_file,
-                      json.dumps({"version": INDEX_VERSION, "files": new_hashes, "indexed_at": times}))
+        times = {rel: now if rel in to_read or rel not in old_times else old_times[rel] for rel in new_hashes}
+        _write_atomic(self._manifest_file, json.dumps(
+            {"version": INDEX_VERSION, "files": new_hashes, "indexed_at": times, "errors": failed}))
         self._index = _Index.build(chunks)  # atomic swap
         reprocessed = updated + forced
-        return IngestReport(added, reprocessed, removed, len(current) - len(added) - len(reprocessed), len(chunks), empty)
+        return IngestReport([r for r in added if r not in failed], [r for r in reprocessed if r not in failed], removed,
+                            len(current) - len(added) - len(reprocessed), len(chunks), empty, failed)
 
     # -- transcriptions (PDF text written by Claude, see rag/ocr.py)
 

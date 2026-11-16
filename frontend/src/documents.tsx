@@ -22,6 +22,7 @@ const STATUS: Record<DocStatus, { label: string; cls: string; hint: string }> = 
   changed: { label: "Changed", cls: "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300", hint: "Edited since the last index - re-index to update" },
   new: { label: "Not indexed", cls: "bg-sky-100 text-sky-800 dark:bg-sky-900/40 dark:text-sky-300", hint: "Not searchable yet - re-index to add it" },
   empty: { label: "No text found", cls: "bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300", hint: "Indexed, but no text could be extracted (most likely a scanned PDF), so it isn't searchable" },
+  error: { label: "Couldn't read", cls: "bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300", hint: "The last re-index couldn't read this file, so it isn't searchable" },
   deleted: { label: "Deleted", cls: "bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300", hint: "File removed but still in the index - re-index to drop it" },
 };
 
@@ -233,6 +234,17 @@ function IngestBanner({ ingest }: { ingest: IngestState }) {
     const r = ingest.report;
     const parts = [r.added.length && `${r.added.length} added`, r.updated.length && `${r.updated.length} updated`,
       r.removed.length && `${r.removed.length} removed`, r.empty?.length && `${r.empty.length} with no text`].filter(Boolean);
+    const failed = Object.entries(r.failed ?? {});
+    if (failed.length) {
+      return (
+        <Alert tone="error">
+          {failed.length === 1 ? "1 file was" : `${failed.length} files were`} skipped; the rest is indexed{parts.length ? ` (${parts.join(", ")})` : ""}.
+          <ul className="mt-1 list-disc pl-5">
+            {failed.map(([name, reason]) => <li key={name}><span className="font-medium">{name}</span>: {reason}</li>)}
+          </ul>
+        </Alert>
+      );
+    }
     return (
       <div className="mt-4 flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-300" role="status">
         {Icon.check()} Index up to date{parts.length ? `: ${parts.join(", ")}` : " - nothing changed"}. {r.chunks} chunks.
@@ -341,9 +353,10 @@ function FileTable({ docs, onView, onDelete, onTranscribe, busy, compact = false
                     <span className="shrink-0 text-zinc-400">{Icon.doc()}</span>
                     <span className="truncate font-medium">{d.name}</span>
                   </button>
+                  {d.error && <p className="ml-6 mt-0.5 text-xs text-red-700 dark:text-red-300">{d.error}</p>}
                 </td>
                 <td className="px-3 py-2.5">
-                  <span className={`whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium ${st.cls}`} title={st.hint}>{st.label}</span>
+                  <span className={`whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium ${st.cls}`} title={d.error ?? st.hint}>{st.label}</span>
                   {d.transcribed && (
                     <div className="mt-1 whitespace-nowrap text-[11px] text-zinc-500" title="Text written by Claude from the page images">Transcribed by Claude</div>
                   )}

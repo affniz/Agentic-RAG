@@ -81,7 +81,7 @@ export type ChatEvent =
   | { type: "error"; message: string }
   | { type: "done"; seconds: number; conversation: ConversationSummary };
 
-export type DocStatus = "indexed" | "changed" | "new" | "deleted" | "empty";
+export type DocStatus = "indexed" | "changed" | "new" | "deleted" | "empty" | "error";
 
 export type DocumentRow = {
   name: string;
@@ -89,6 +89,7 @@ export type DocumentRow = {
   size: number | null;
   modified: number | null;
   indexed_at: number | null;
+  error: string | null;
   chunks: number;
   status: DocStatus;
   pages: number | null;
@@ -106,7 +107,7 @@ export type IngestState = {
   started_at?: number;
   finished_at?: number;
   error?: string;
-  report?: { added: string[]; updated: string[]; removed: string[]; unchanged: number; chunks: number; empty?: string[] };
+  report?: { added: string[]; updated: string[]; removed: string[]; unchanged: number; chunks: number; empty?: string[]; failed?: Record<string, string> };
 };
 
 export type DocumentsResponse = {
