@@ -81,6 +81,8 @@ def main() -> None:
         r = kb.ingest(args.docs_dir, rebuild=args.rebuild)
         print(f"Index: {r.chunks} chunks from {len(kb.sources())} documents "
               f"(added {len(r.added)}, updated {len(r.updated)}, removed {len(r.removed)}, unchanged {r.unchanged}).")
+        for name, reason in r.failed.items():
+            print(f"Skipped {name}: {reason}")
         for name in r.empty:
             hint = "" if args.ocr or not name.lower().endswith(".pdf") else " Scanned PDF? Re-run with --ocr."
             print(f"Warning: no text found in {name} - it isn't searchable.{hint}")
