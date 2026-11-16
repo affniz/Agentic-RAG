@@ -134,3 +134,26 @@ def test_unreadable_pdf_shows_error_status(client):
     assert row["status"] == "error" and "password-protected" in row["error"]
     assert body["needs_ingest"] is False  # re-indexing again won't help; the reason says what will
     assert next(d for d in body["documents"] if d["name"] == "vacation.md")["status"] == "indexed"
+
+
+def test_deleting_a_transcribed_pdf_deletes_its_transcription(client):
+    import io
+
+    from tests.test_store import _blank_pdf
+
+    c = client
+    _blank_pdf(c.docs / "scan.pdf", pages=2)
+    data = (c.docs / "scan.pdf").read_bytes()
+    c.post("/api/ingest", json={})
+    wait_ingest(c)
+    c.post("/api/documents/scan.pdf/transcribe")
+    wait_ingest(c)
+    assert next(d for d in c.get("/api/documents").json()["documents"] if d["name"] == "scan.pdf")["transcribed"]
+
+    c.delete("/api/documents/scan.pdf")
+    wait_ingest(c)
+    # Upload the very same file again: it must come back as untranscribed, not reuse the old text.
+    c.post("/api/documents", files=[("files", ("scan.pdf", io.BytesIO(data), "application/pdf"))])
+    wait_ingest(c)
+    row = next(d for d in c.get("/api/documents").json()["documents"] if d["name"] == "scan.pdf")
+    assert row["transcribed"] is False and row["status"] == "empty"

@@ -324,6 +324,7 @@ class KnowledgeBase:
             if p.is_file() and p.suffix.lower() in SUPPORTED
         }
         new_hashes = {rel: _file_hash(p) for rel, p in current.items()}
+        self._prune_transcriptions(set(new_hashes.values()))
         added = [r for r in current if r not in old_hashes]
         updated = [r for r in current if r in old_hashes and old_hashes[r] != new_hashes[r]]
         removed = [r for r in old_hashes if r not in current]
@@ -407,6 +408,12 @@ class KnowledgeBase:
             return False
         cache.unlink()
         return True
+
+    def _prune_transcriptions(self, in_use: set[str]) -> None:
+        """Delete saved transcriptions whose file is gone (deleted or replaced by a new version)."""
+        for cache in (self.index_dir / "ocr").glob("*.md"):
+            if cache.stem not in in_use:
+                cache.unlink(missing_ok=True)
 
     def _extract(self, path: Path, digest: str) -> tuple[str, bool]:
         """(text, is_markdown) for one file.

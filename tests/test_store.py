@@ -280,3 +280,21 @@ def test_missing_crypto_dependency_says_what_to_install(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "_read", fail)
     r = KnowledgeBase(tmp_path / "idx", rerank=False).ingest(docs)
     assert "cryptography" in r.failed["card.pdf"] and "pip install" in r.failed["card.pdf"]
+
+
+def test_ingest_prunes_transcriptions_of_removed_or_replaced_files(tmp_path):
+    docs = make_docs(tmp_path)
+    _blank_pdf(docs / "a.pdf")
+    kb = KnowledgeBase(tmp_path / "idx", rerank=False)
+    assert kb.transcribe(docs / "a.pdf", lambda p: "# A\nTranscribed text of a.")
+    kb.ingest(docs)
+    assert kb.has_transcription(docs / "a.pdf")
+
+    _blank_pdf(docs / "a.pdf", pages=2)  # replaced by a different version: the old text no longer applies
+    kb.ingest(docs)
+    assert not list((tmp_path / "idx" / "ocr").glob("*.md"))
+
+    assert kb.transcribe(docs / "a.pdf", lambda p: "# A\nTranscribed text of a.")
+    (docs / "a.pdf").unlink()  # removed outside the app
+    kb.ingest(docs)
+    assert not list((tmp_path / "idx" / "ocr").glob("*.md"))

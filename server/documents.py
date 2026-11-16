@@ -185,6 +185,11 @@ def make_router(kb: KnowledgeBase, docs_dir: Path, transcriber: Callable[[], Tra
         path = resolve(name)
         if path.suffix.lower() not in SUPPORTED or not path.is_file():
             raise HTTPException(404, "document not found")
+        # Delete its transcription now, not at the next ingest (which may wait behind a running one),
+        # unless another file in the folder has identical contents and still uses it.
+        digest = kb.indexed_files().get(name)
+        if not any(d == digest for other, d in kb.indexed_files().items() if other != name):
+            kb.clear_transcription(path)
         path.unlink()
         return {"deleted": name, "ingest": job.state if job.running else job.start(reason="delete")}
 
