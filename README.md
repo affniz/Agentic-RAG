@@ -17,7 +17,7 @@ question ─► Claude (claude-haiku-5-5) ──tool calls──► list_documen
 
 | File | Role |
 |---|---|
-| `rag/store.py` | Loads `.md` / `.txt` / `.pdf`; heading-aware chunking (each chunk knows its Markdown section path); incremental indexing into ChromaDB (local all-MiniLM-L6-v2 ONNX embeddings) + BM25; hybrid search with Reciprocal Rank Fusion; optional local cross-encoder reranking |
+| `rag/store.py` | Loads `.md` / `.txt` / `.pdf`; heading-aware chunking (each chunk knows its Markdown section path); incremental per-chunk indexing (content-hashed chunk ids, so an edit only re-embeds the chunks it changed) into ChromaDB (local all-MiniLM-L6-v2 ONNX embeddings) + BM25; hybrid search with Reciprocal Rank Fusion; optional local cross-encoder reranking |
 | `rag/agent.py` | The agent loop: strict tool schemas, parallel tool execution, multi-turn memory, step limit, refusal / `max_tokens` handling, event callbacks, per-question cost tracking |
 | `rag/evaluate.py` | Retrieval metrics, and answer grading that compares the agent with the one-shot baseline per question category |
 | `rag/baseline.py` | One-shot RAG baseline (retrieve once, answer once) for comparison |
@@ -44,7 +44,7 @@ downloaded, search keeps working without it (or pass `--no-rerank`).
 ## Usage
 
 ```bash
-python main.py ingest docs                 # sync the index; only new/changed files are re-embedded
+python main.py ingest docs                 # sync the index; only new or edited chunks are re-embedded
 python main.py ingest docs --rebuild       # re-embed everything
 python main.py search "carry over"         # test retrieval alone, no API call (--mode bm25|vector|hybrid)
 python main.py ask "How many vacation days do I get after 6 years, and how many can I carry over?"

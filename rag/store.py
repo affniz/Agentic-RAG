@@ -20,14 +20,14 @@ from rank_bm25 import BM25Plus
 
 SUPPORTED = {".md", ".txt", ".pdf"}
 COLLECTION = "docs"
-INDEX_VERSION = 3  # bump when the chunk format changes; forces a full rebuild
+INDEX_VERSION = 4  # bump when the chunk format changes; forces a full rebuild
 RERANK_MODEL = "Xenova/ms-marco-MiniLM-L-6-v2"
 SEARCH_MODES = ("hybrid", "bm25", "vector")
 
 
 @dataclass
 class Chunk:
-    id: str
+    id: str  # content-derived (see _content_id): unchanged text keeps its id, so its vector is reused
     source: str  # path relative to the docs folder
     index: int  # position of the chunk within its document
     text: str
@@ -57,6 +57,7 @@ class IngestReport:
     chunks: int
     empty: list[str] = field(default_factory=list)  # files that yielded no text (e.g. scanned PDFs)
     failed: dict[str, str] = field(default_factory=dict)  # files that couldn't be read: {name: reason}
+    embedded: int = 0  # chunks whose text was new and had to be embedded; the rest reused their vectors
 
 
 # ---------------------------------------------------------------- loading & chunking
@@ -153,16 +154,31 @@ def _doc_note(sections: list[tuple[str, str]], max_chars: int = 300) -> tuple[st
     return section, (note[: max_chars - 3] + "...") if len(note) > max_chars else note
 
 
+def _content_id(source: str, indexed_text: str, occurrence: int) -> str:
+    """Vector id for a chunk: a hash of its document and of the text that gets embedded.
+
+    Ids don't depend on position, so when a document is edited, chunks whose text didn't change
+    keep their id (and their vector), even if an earlier insertion shifted their index.
+    `occurrence` tells identical chunks within one document apart.
+    """
+    digest = hashlib.sha256(f"{source}\0{indexed_text}".encode()).hexdigest()[:24]
+    return digest if occurrence == 0 else f"{digest}-{occurrence}"
+
+
 def chunk_document(source: str, text: str, markdown: bool) -> list[Chunk]:
     sections = _sections(text, markdown)
     _, note = _doc_note(sections)
     chunks: list[Chunk] = []
+    seen: dict[str, int] = {}
     for section, body in sections:
         for piece in _chunk(body):
             i = len(chunks)
             # The document's first chunk contains the intro itself.
-            cid = hashlib.sha1(f"{source}:{i}".encode()).hexdigest()[:16]
-            chunks.append(Chunk(cid, source, i, piece, section, "" if i == 0 else note))
+            chunk = Chunk("", source, i, piece, section, "" if i == 0 else note)
+            n = seen.get(chunk.indexed_text, 0)
+            seen[chunk.indexed_text] = n + 1
+            chunk.id = _content_id(source, chunk.indexed_text, n)
+            chunks.append(chunk)
     return chunks
 
 
@@ -301,8 +317,10 @@ class KnowledgeBase:
         on_progress: ProgressFn | None = None,
         force: list[str] | tuple[str, ...] = (),
     ) -> IngestReport:
-        """Sync the index with `docs_dir`: embed new/changed files, drop deleted ones.
+        """Sync the index with `docs_dir`: re-read new/changed files, drop deleted ones.
 
+        Updates are incremental per chunk: a changed file is re-chunked, and only chunks whose text
+        is new get embedded; unchanged chunks keep their vectors (see _content_id).
         force: files (relative paths) to re-read even if unchanged, e.g. after transcribing one.
         Searches keep working during an ingest and see the old index until the new one is swapped in.
         """
@@ -311,11 +329,11 @@ class KnowledgeBase:
 
     def _ingest(self, docs_dir: Path, rebuild: bool, progress: ProgressFn, force: set[str]) -> IngestReport:
         manifest = self._manifest()
-        kept = list(self.chunks)
+        old_chunks = list(self.chunks)
         if rebuild or manifest.get("version") != INDEX_VERSION:
             self._client.delete_collection(COLLECTION)
             self._col = self._get_collection()
-            kept, manifest = [], {}
+            old_chunks, manifest = [], {}
         old_hashes: dict[str, str] = manifest.get("files", {})
 
         current: dict[str, Path] = {
@@ -329,19 +347,17 @@ class KnowledgeBase:
         updated = [r for r in current if r in old_hashes and old_hashes[r] != new_hashes[r]]
         removed = [r for r in old_hashes if r not in current]
         forced = sorted(r for r in force if r in current and r not in added and r not in updated)
-        stale = set(updated) | set(removed) | set(forced)
 
-        if stale:
-            self._col.delete(where={"source": {"$in": sorted(stale)}})
-            kept = [c for c in kept if c.source not in stale]
-
-        fresh: list[Chunk] = []
         # PDFs that produced no chunks (e.g. scanned, indexed before OCR was enabled) get another
         # try once OCR is available. Based on the index itself, so it also covers older indexes.
-        with_chunks = {c.source for c in kept}
-        retry = [r for r in current if r not in with_chunks and r not in stale and r not in added
-                 and self.pdf_ocr is not None and r.lower().endswith(".pdf")]
+        with_chunks = {c.source for c in old_chunks}
+        retry = [r for r in current if r not in with_chunks and r not in added and r not in updated
+                 and r not in forced and self.pdf_ocr is not None and r.lower().endswith(".pdf")]
         to_read = added + updated + forced + retry
+
+        # 1. Read and chunk. Nothing is removed yet: a file that fails to read keeps its old chunks.
+        fresh: list[Chunk] = []
+        reread: set[str] = set()
         empty: list[str] = []
         failed: dict[str, str] = {}
         for n, rel in enumerate(to_read):
@@ -357,30 +373,51 @@ class KnowledgeBase:
             if not doc_chunks:
                 empty.append(rel)
             fresh += doc_chunks
-        for start in range(0, len(fresh), 64):
-            progress("embedding", start, len(fresh))
-            batch = fresh[start : start + 64]
+            reread.add(rel)
+
+        # 2. Embed only chunks the collection doesn't already hold. Ids are content hashes, so an
+        # unchanged chunk of an edited file (or one left by an interrupted ingest) is reused.
+        stored = set(self._col.get(include=[])["ids"])
+        to_embed = [c for c in fresh if c.id not in stored]
+        for start in range(0, len(to_embed), 64):
+            progress("embedding", start, len(to_embed))
+            batch = to_embed[start : start + 64]
             self._col.add(
                 ids=[c.id for c in batch],
                 documents=[c.indexed_text for c in batch],
-                metadatas=[{"source": c.source, "index": c.index} for c in batch],
+                metadatas=[{"source": c.source} for c in batch],
             )
-        progress("embedding", len(fresh), len(fresh))
+        progress("embedding", len(to_embed), len(to_embed))
 
-        chunks = sorted(kept + fresh, key=lambda c: (c.source, c.index))
+        # 3. Swap in the new chunk list. Old chunks go only for files that were re-read or removed.
+        gone = reread | set(removed)
+        chunks = sorted([c for c in old_chunks if c.source not in gone] + fresh, key=lambda c: (c.source, c.index))
         _write_atomic(self._chunks_file, json.dumps([asdict(c) for c in chunks]))
-        # Failed files stay out of the manifest, so they're retried on every ingest until they read.
+        # A file that failed keeps the hash its current chunks came from (none if it was never read),
+        # so it still differs from the file on disk and is retried on every ingest until it reads.
         for rel in failed:
-            new_hashes.pop(rel)
+            if rel in old_hashes:
+                new_hashes[rel] = old_hashes[rel]
+            else:
+                new_hashes.pop(rel)
         now = time.time()
         old_times: dict[str, float] = manifest.get("indexed_at", {})
-        times = {rel: now if rel in to_read or rel not in old_times else old_times[rel] for rel in new_hashes}
+        times = {rel: now if rel in reread or rel not in old_times else old_times[rel] for rel in new_hashes}
         _write_atomic(self._manifest_file, json.dumps(
             {"version": INDEX_VERSION, "files": new_hashes, "indexed_at": times, "errors": failed}))
         self._index = _Index.build(chunks)  # atomic swap
-        reprocessed = updated + forced
-        return IngestReport([r for r in added if r not in failed], [r for r in reprocessed if r not in failed], removed,
-                            len(current) - len(added) - len(reprocessed), len(chunks), empty, failed)
+
+        # 4. Only now delete vectors nothing refers to any more (old versions of edited chunks,
+        # removed files, leftovers of an interrupted ingest), so vector search never has a gap.
+        live = {c.id for c in chunks}
+        orphans = sorted((stored | {c.id for c in to_embed}) - live)
+        for start in range(0, len(orphans), 500):
+            self._col.delete(ids=orphans[start : start + 500])
+
+        reprocessed = [r for r in updated + forced if r not in failed]
+        return IngestReport([r for r in added if r not in failed], reprocessed, removed,
+                            len(current) - len(added) - len(reprocessed), len(chunks), empty, failed,
+                            embedded=len(to_embed))
 
     # -- transcriptions (PDF text written by Claude, see rag/ocr.py)
 
