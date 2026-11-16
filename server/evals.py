@@ -157,7 +157,7 @@ def make_router(evals_dir: Path, index_root: Path, client_factory: Callable[[], 
         answers = n * req.repeats
         if req.kind == "retrieval" or demo:
             return {"total_usd": 0.0, "questions": n, "answers": answers, "per_system": {}, "judge_usd": 0.0,
-                    "api_calls": 0, "basis": "demo" if demo and req.kind == "answers" else "free"}
+                    "api_calls": 0, "basis": "demo" if demo and req.kind == "answers" else "free", "model": model}
         past = [r for r in runs() if r["kind"] == "answers" and r.get("model") == model]
         per_system, basis, calls = {}, "history", 0.0
         judge_per_q: list[float] = []
