@@ -5,8 +5,11 @@ import { api } from "./api";
 import { Icon } from "./components";
 import { modelLabel } from "./settings";
 import type {
-  Estimate, EvalJob, EvalRequest, EvalRow, EvalRun, EvalSet, EvalSystem, ExportResult, FeedbackRecord, Health, Settings,
+  Effort, Estimate, EvalJob, EvalRequest, EvalRow, EvalRun, EvalSet, EvalSystem, ExportResult, FeedbackRecord, Health,
+  Settings,
 } from "./types";
+
+const EFFORTS: Effort[] = ["low", "medium", "high", "xhigh", "max"];
 
 // ---------------------------------------------------------------- helpers
 
@@ -100,7 +103,7 @@ export function EvalsPage({ health, settings }: { health: Health | null; setting
           </div>
         )}
 
-        {evalSet && <RunPanel evalSet={evalSet} settings={settings} job={job} onStarted={setJob} />}
+        {evalSet && <RunPanel evalSet={evalSet} settings={settings} models={health?.models ?? []} job={job} onStarted={setJob} />}
 
         <HistoryChart runs={setRuns_} selected={selected} onSelect={setSelected} />
 
@@ -116,22 +119,29 @@ export function EvalsPage({ health, settings }: { health: Health | null; setting
 
 // ---------------------------------------------------------------- run panel
 
-function RunPanel({ evalSet, settings, job, onStarted }: {
+function RunPanel({ evalSet, settings, models, job, onStarted }: {
   evalSet: EvalSet;
   settings: Settings | null;
+  models: string[];
   job: EvalJob;
   onStarted: (j: EvalJob) => void;
 }) {
   const [systems, setSystems] = useState<EvalSystem[]>(["agentic"]);
   const [limit, setLimit] = useState<number | null>(null);
   const [repeats, setRepeats] = useState(1);
+  // null = follow Settings. A choice here applies to eval runs only; chat keeps using Settings.
+  const [modelChoice, setModelChoice] = useState<string | null>(null);
+  const [effortChoice, setEffortChoice] = useState<Effort | null>(null);
+  const model = modelChoice ?? settings?.model ?? "";
+  const effort = effortChoice ?? settings?.effort ?? "medium";
+  const overridden = modelChoice != null || effortChoice != null;
   const [estimate, setEstimate] = useState<Estimate | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const running = job.state === "running";
 
   const request = (kind: EvalRequest["kind"]): EvalRequest =>
-    ({ kind, set: evalSet.name, systems, limit, repeats });
+    ({ kind, set: evalSet.name, systems, limit, repeats, model: model || undefined, effort });
 
   async function start(kind: EvalRequest["kind"]) {
     setBusy(true);
@@ -179,8 +189,29 @@ function RunPanel({ evalSet, settings, job, onStarted }: {
         <div className="rounded-lg bg-zinc-50 p-3 dark:bg-zinc-900">
           <div className="text-sm font-medium">Answer eval <span className="font-normal text-zinc-500">· calls Claude</span></div>
           <p className="mt-1 text-sm text-zinc-500">
-            Answers every question{settings && <> with {modelLabel(settings.model)}, {settings.effort} effort, step limit {settings.max_steps}</>}, then a judge grades each answer against the reference.
+            Answers every question{settings && <> (step limit {settings.max_steps}, from Settings)</>}, then a judge grades each answer against the reference.
           </p>
+          <div className="mt-2 flex flex-wrap items-center gap-3 text-sm">
+            <label htmlFor="eval-model" className="flex items-center gap-1.5">Model
+              <select id="eval-model" value={model} disabled={!settings} className={input}
+                onChange={(e) => setModelChoice(e.target.value === settings?.model ? null : e.target.value)}>
+                {models.map((m) => <option key={m} value={m}>{modelLabel(m)}</option>)}
+              </select>
+            </label>
+            <label htmlFor="eval-effort" className="flex items-center gap-1.5">Effort
+              <select id="eval-effort" value={effort} disabled={!settings} className={input}
+                onChange={(e) => setEffortChoice(e.target.value === settings?.effort ? null : e.target.value as Effort)}>
+                {EFFORTS.map((x) => <option key={x} value={x}>{x}</option>)}
+              </select>
+            </label>
+            {overridden && (
+              <button className="text-xs text-zinc-500 underline-offset-2 hover:text-zinc-800 hover:underline dark:hover:text-zinc-200"
+                onClick={() => { setModelChoice(null); setEffortChoice(null); }}
+                title="This run only; chat still uses Settings">
+                Differs from Settings · reset
+              </button>
+            )}
+          </div>
           <fieldset className="mt-2 flex flex-wrap gap-x-4 gap-y-1">
             <legend className="sr-only">Systems</legend>
             {SYSTEMS.map((s) => (
@@ -209,14 +240,14 @@ function RunPanel({ evalSet, settings, job, onStarted }: {
       </div>
 
       {error && <p className="mt-3 text-sm text-red-600">{error}</p>}
-      {estimate && <ConfirmCost estimate={estimate} busy={busy} onCancel={() => setEstimate(null)} onConfirm={() => start("answers")} />}
+      {estimate && <ConfirmCost estimate={estimate} busy={busy} what={`${modelLabel(model)}, ${effort} effort`} onCancel={() => setEstimate(null)} onConfirm={() => start("answers")} />}
       {job.state !== "idle" && <JobStatus job={job} />}
     </section>
   );
 }
 
-function ConfirmCost({ estimate, busy, onCancel, onConfirm }: {
-  estimate: Estimate; busy: boolean; onCancel: () => void; onConfirm: () => void;
+function ConfirmCost({ estimate, busy, what, onCancel, onConfirm }: {
+  estimate: Estimate; busy: boolean; what: string; onCancel: () => void; onConfirm: () => void;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   useEffect(() => { ref.current?.showModal(); }, []);
@@ -230,6 +261,7 @@ function ConfirmCost({ estimate, busy, onCancel, onConfirm }: {
     <dialog ref={ref} onClose={onCancel} aria-labelledby="confirm-title"
       className="m-auto w-[min(28rem,calc(100vw-2rem))] rounded-xl border border-zinc-200 bg-white p-5 text-zinc-900 backdrop:bg-black/40 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100">
       <h3 id="confirm-title" className="font-semibold">Run the answer eval?</h3>
+      <p className="text-sm text-zinc-500">{what}</p>
       <div className="mt-3 text-3xl font-semibold tabular-nums">~{usd(estimate.total_usd)}</div>
       <p className="mt-1 text-sm text-zinc-500">{basis}</p>
       <dl className="mt-4 space-y-1 text-sm">

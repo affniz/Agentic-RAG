@@ -56,7 +56,7 @@ python main.py chat                        # multi-turn; /reset, /cost, /quit
 
 ## Web UI
 
-![Chat UI with a cited answer and the source panel open](assets/screenshot.png)
+![Chat UI in dark mode: the agent runs three searches, answers with citations, and the cited chunk is open in the source panel](assets/screenshot.png)
 
 Four screens, all in the sidebar. Works on mobile and in dark mode.
 
@@ -89,7 +89,9 @@ before relying on it: a 👍 only means the answer looked right.
 
 The **Settings** screen (`/#/settings`) sets the model, effort, results per search (or let the model
 choose), reranking and the step limit. They apply to chat from the next question and to answer evals,
-so an eval measures what you get in chat. Each run records the settings it used.
+so an eval measures what you get in chat. The answer eval box also has its own Model and Effort
+dropdowns, which start at your settings; changing them affects that eval run only, so you can compare
+models without touching chat. Each run records the settings it used.
 
 - **Demo mode:** `RAG_FAKE_LLM=1 python -m uvicorn server.app:app` runs the whole UI with real search but a
   fake model: no API key, no cost. Handy for UI work.

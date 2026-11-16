@@ -143,3 +143,15 @@ def test_eval_dashboard_runs(client):
     assert all("[vacation.md#0]" in r["answer"] for r in detail["rows"])  # both systems answered from the docs
     assert client.get("/api/evals/runs/missing.json").status_code == 404
     assert client.post("/api/evals/run", json={"kind": "answers", "set": "nope"}).status_code == 404
+
+
+def test_eval_run_model_override_leaves_settings_alone(client):
+    before = client.get("/api/settings").json()
+    est = client.post("/api/evals/estimate", json={"kind": "answers", "set": "mini", "model": "claude-sonnet-5-5"}).json()
+    assert est["model"] == "claude-sonnet-5-5"
+    client.post("/api/evals/run", json={"kind": "answers", "set": "mini", "model": "claude-sonnet-5-5", "effort": "high"})
+    job = wait_for_job(client)
+    run = client.get(f"/api/evals/runs/{job['result_file']}").json()["summary"]
+    assert (run["model"], run["effort"]) == ("claude-sonnet-5-5", "high")
+    assert client.get("/api/settings").json() == before
+    assert client.post("/api/evals/run", json={"kind": "answers", "set": "mini", "model": "gpt-4"}).status_code == 400
