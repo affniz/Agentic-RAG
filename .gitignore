@@ -6,3 +6,4 @@ evals/results/
 frontend/node_modules/
 frontend/dist/
 .rag_index_eval_*/
+frontend/*.tsbuildinfo
