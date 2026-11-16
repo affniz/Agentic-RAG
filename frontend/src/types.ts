@@ -62,3 +62,53 @@ export type ChatEvent =
   | { type: "usage"; usage: Usage; cost_usd: number | null }
   | { type: "error"; message: string }
   | { type: "done"; seconds: number; conversation: ConversationSummary };
+
+export type DocStatus = "indexed" | "changed" | "new" | "deleted";
+
+export type DocumentRow = {
+  name: string;
+  type: string;
+  size: number | null;
+  modified: number | null;
+  chunks: number;
+  status: DocStatus;
+};
+
+export type IngestState = {
+  state: "idle" | "running" | "done" | "error";
+  stage?: string;
+  done?: number;
+  total?: number;
+  reason?: string;
+  started_at?: number;
+  finished_at?: number;
+  error?: string;
+  report?: { added: string[]; updated: string[]; removed: string[]; unchanged: number; chunks: number };
+};
+
+export type DocumentsResponse = {
+  documents: DocumentRow[];
+  chunks: number;
+  ingest: IngestState;
+  needs_ingest: boolean;
+};
+
+export type UploadResponse = {
+  saved: string[];
+  rejected: { name: string; reason: string }[];
+  ingest: IngestState | null;
+};
+
+export type SearchResult = {
+  rank: number;
+  score: number;
+  source: string;
+  index: number;
+  section: string;
+  doc_note: string;
+  text: string;
+};
+
+export type SearchResponse = { query: string; mode: string; reranked: boolean; ms: number; results: SearchResult[] };
+
+export type DocChunks = { name: string; doc_note: string; chunks: { index: number; section: string; text: string }[] };

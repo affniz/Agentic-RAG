@@ -21,6 +21,10 @@ export const Icon = {
   menu: (c?: string) => svg(<path d="M4 6h16M4 12h16M4 18h16" />, c),
   send: (c?: string) => svg(<path d="M5 12h14M13 6l6 6-6 6" />, c),
   chevron: (c?: string) => svg(<path d="m9 6 6 6-6 6" />, c),
+  upload: (c?: string) => svg(<path d="M12 16V4M7 9l5-5 5 5M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3" />, c),
+  refresh: (c?: string) => svg(<path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7" />, c),
+  chat: (c?: string) => svg(<path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z" />, c),
+  folder: (c?: string) => svg(<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />, c),
   trash: (c?: string) => svg(<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3" />, c),
   spinner: (c = "h-4 w-4") => (
     <svg viewBox="0 0 24 24" className={`${c} animate-spin`} aria-hidden>
@@ -40,10 +44,14 @@ function ago(ts: number): string {
   return `${Math.floor(s / 86400)}d ago`;
 }
 
+export type View = "chat" | "documents";
+
 export function Sidebar(props: {
   conversations: ConversationSummary[];
   activeId: string | null;
   health: Health | null;
+  view: View;
+  onNavigate: (v: View) => void;
   onSelect: (id: string) => void;
   onNew: () => void;
   onDelete: (id: string) => void;
@@ -55,6 +63,15 @@ export function Sidebar(props: {
         <div className="grid h-7 w-7 place-items-center rounded-md bg-indigo-600 text-white">{Icon.search("h-4 w-4")}</div>
         <span className="font-semibold tracking-tight">Agentic RAG</span>
       </div>
+      <nav className="space-y-0.5 px-2 pb-3" aria-label="Sections">
+        {([["chat", "Chat", Icon.chat()], ["documents", "Documents", Icon.folder()]] as const).map(([id, label, icon]) => (
+          <button key={id} onClick={() => props.onNavigate(id)} aria-current={props.view === id ? "page" : undefined}
+            className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium ${props.view === id
+              ? "bg-zinc-200/70 dark:bg-zinc-800" : "text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-900"}`}>
+            {icon} {label}
+          </button>
+        ))}
+      </nav>
       <div className="px-3">
         <button onClick={props.onNew}
           className="flex w-full items-center gap-2 rounded-lg border border-zinc-200 px-3 py-2 text-sm font-medium hover:bg-zinc-100 dark:border-zinc-800 dark:hover:bg-zinc-900">
@@ -65,7 +82,7 @@ export function Sidebar(props: {
         {conversations.length === 0 && <p className="px-3 py-2 text-sm text-zinc-500">No conversations yet.</p>}
         {conversations.map((c) => (
           <div key={c.id}
-            className={`group flex items-center rounded-lg ${c.id === activeId ? "bg-zinc-200/70 dark:bg-zinc-800" : "hover:bg-zinc-100 dark:hover:bg-zinc-900"}`}>
+            className={`group flex items-center rounded-lg ${c.id === activeId && props.view === "chat" ? "bg-zinc-200/70 dark:bg-zinc-800" : "hover:bg-zinc-100 dark:hover:bg-zinc-900"}`}>
             <button onClick={() => props.onSelect(c.id)} className="min-w-0 flex-1 px-3 py-2 text-left">
               <div className="truncate text-sm">{c.title}</div>
               <div className="mt-0.5 text-xs text-zinc-500">

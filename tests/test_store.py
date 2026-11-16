@@ -92,3 +92,30 @@ def test_document_intro_is_attached_to_every_chunk():
     assert all(c.doc_note == "" for c in chunk_document("r.md", "# Notes\n## v1\nx\n## v2\ny", markdown=True))
     txt = chunk_document("p.txt", "Expense Policy\n\n" + "\n\n".join("rule " * 40 for _ in range(6)), markdown=False)
     assert txt[0].doc_note == "" and txt[-1].doc_note == "Expense Policy"
+
+
+def test_manifest_readable_during_ingest(tmp_path):
+    """Regression: the documents API read manifest.json while ingest was rewriting it."""
+    import threading
+
+    docs = make_docs(tmp_path)
+    for i in range(30):
+        (docs / f"extra{i}.md").write_text(f"# Doc {i}\n" + "word " * 200)
+    kb = KnowledgeBase(tmp_path / "idx", rerank=False)
+    kb.ingest(docs)
+    errors, stop = [], threading.Event()
+
+    def reader():
+        while not stop.is_set():
+            try:
+                kb.indexed_files()
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+
+    t = threading.Thread(target=reader)
+    t.start()
+    for _ in range(3):
+        kb.ingest(docs, rebuild=True)
+    stop.set()
+    t.join()
+    assert errors == []

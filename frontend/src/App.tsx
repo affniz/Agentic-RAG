@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, streamChat } from "./api";
-import { Answer, CitationPanel, Composer, Icon, Sidebar, Steps, type CiteRef } from "./components";
+import { Answer, CitationPanel, Composer, Icon, Sidebar, Steps, type CiteRef, type View } from "./components";
+import { DocumentsPage } from "./documents";
 import type { ConversationSummary, Health, Turn } from "./types";
 
 const SUGGESTIONS = [
@@ -29,8 +30,24 @@ export default function App() {
   const [navOpen, setNavOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const viewFromHash = (): View => (window.location.hash === "#/documents" ? "documents" : "chat");
+  const [view, setView] = useState<View>(viewFromHash);
+
+  useEffect(() => {
+    const onHash = () => setView(viewFromHash());
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+
+  const navigate = (v: View) => {
+    window.location.hash = v === "documents" ? "#/documents" : "#/";
+    setView(v);
+    setNavOpen(false);
+  };
 
   const refreshList = useCallback(() => api.conversations().then(setConversations).catch(() => {}), []);
+
+  const refreshHealth = useCallback(() => api.health().then(setHealth).catch(() => {}), []);
 
   useEffect(() => {
     api.health().then((h) => { setHealth(h); setModel(h.default_model); })
@@ -90,7 +107,7 @@ export default function App() {
   }
 
   async function open(id: string) {
-    setNavOpen(false);
+    navigate("chat");
     setCite(null);
     const c = await api.conversation(id);
     setActiveId(id);
@@ -98,6 +115,7 @@ export default function App() {
   }
 
   function newChat() {
+    navigate("chat");
     setActiveId(null);
     setTurns([]);
     setCite(null);
@@ -117,11 +135,20 @@ export default function App() {
       {/* Sidebar: static on desktop, drawer on mobile */}
       <aside className={`fixed inset-y-0 left-0 z-30 w-72 border-r border-zinc-200 bg-zinc-50 transition-transform dark:border-zinc-800 dark:bg-zinc-900
         md:static md:translate-x-0 ${navOpen ? "translate-x-0" : "-translate-x-full"}`}>
-        <Sidebar conversations={conversations} activeId={activeId} health={health}
-          onSelect={open} onNew={newChat} onDelete={remove} />
+        <Sidebar conversations={conversations} activeId={activeId} health={health} view={view}
+          onNavigate={navigate} onSelect={open} onNew={newChat} onDelete={remove} />
       </aside>
       {navOpen && <div className="fixed inset-0 z-20 bg-black/30 md:hidden" onClick={() => setNavOpen(false)} />}
 
+      {view === "documents" ? (
+        <main className="flex min-w-0 flex-1 flex-col">
+          <header className="flex items-center gap-2 border-b border-zinc-200 px-4 py-2.5 md:hidden dark:border-zinc-800">
+            <button className="rounded p-1" onClick={() => setNavOpen(true)} aria-label="Open navigation">{Icon.menu("h-5 w-5")}</button>
+            <span className="text-sm font-medium">Documents</span>
+          </header>
+          <DocumentsPage health={health} onIndexChanged={refreshHealth} />
+        </main>
+      ) : (<>
       <main className="flex min-w-0 flex-1 flex-col">
         <header className="flex items-center gap-2 border-b border-zinc-200 px-4 py-2.5 dark:border-zinc-800">
           <button className="rounded p-1 md:hidden" onClick={() => setNavOpen(true)} aria-label="Open conversations">{Icon.menu("h-5 w-5")}</button>
@@ -192,6 +219,7 @@ export default function App() {
           </aside>
         </>
       )}
+      </>)}
     </div>
   );
 }

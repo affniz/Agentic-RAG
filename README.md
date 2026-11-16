@@ -61,6 +61,13 @@ Streaming answers, a live trace of the agent's searches, numbered citation chips
 cited chunk (with its neighbours) in a side panel, per-answer cost, model/effort pickers, and a
 conversation list. Works on mobile and in dark mode.
 
+The **Documents** screen (sidebar, or `/#/documents`) manages the knowledge base without the CLI:
+drag-and-drop upload of `.md` / `.txt` / `.pdf` (indexed automatically), a status per file
+(indexed / changed on disk / not indexed / deleted), re-index or full rebuild with live progress,
+delete, a viewer showing each document's chunks and the note shown to the model with them, and a
+**search tester** that runs the agent's search tool directly (hybrid, keyword or semantic, with or
+without reranking) so you can debug retrieval without spending tokens.
+
 ```bash
 cd frontend && npm install && npm run build && cd ..   # once, and after frontend changes
 python -m uvicorn server.app:app --port 8000           # then open http://localhost:8000
@@ -70,7 +77,7 @@ python -m uvicorn server.app:app --port 8000           # then open http://localh
   fake model: no API key, no cost. Handy for UI work.
 - **Frontend dev with hot reload:** run the server as above, then `cd frontend && npm run dev` and open
   http://localhost:5173 (API calls are proxied to :8000).
-- Other settings: `RAG_INDEX` (index directory), `RAG_RERANK=0` (turn off the reranker).
+- Other settings: `RAG_DOCS` (documents folder, default `./docs`), `RAG_INDEX` (index directory), `RAG_RERANK=0` (turn off the reranker).
 - Conversations are kept in memory for now and are lost when the server restarts.
 
 ## Evaluation
@@ -128,7 +135,7 @@ Rough cost for the hard set (estimates): Haiku, both systems ≈ $0.15; Sonnet, 
 ## Tests
 
 ```bash
-pip install -r requirements-dev.txt && pytest -q   # 18 tests, no API key needed
+pip install -r requirements-dev.txt && pytest -q   # 25 tests, no API key needed
 ```
 
 ## Settings worth knowing

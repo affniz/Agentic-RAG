@@ -1,4 +1,9 @@
-import type { ChatEvent, ChunkView, ConversationSummary, Health, Turn } from "./types";
+import type {
+  ChatEvent, ChunkView, ConversationSummary, DocChunks, DocumentsResponse, Health, IngestState,
+  SearchResponse, Turn, UploadResponse,
+} from "./types";
+
+const path = (name: string) => name.split("/").map(encodeURIComponent).join("/");
 
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail ?? `HTTP ${res.status}`);
@@ -11,8 +16,23 @@ export const api = {
   conversation: (id: string) =>
     fetch(`/api/conversations/${id}`).then(json<ConversationSummary & { messages: Turn[] }>),
   deleteConversation: (id: string) => fetch(`/api/conversations/${id}`, { method: "DELETE" }).then(json),
-  chunk: (source: string, index: number) =>
-    fetch(`/api/chunks/${source.split("/").map(encodeURIComponent).join("/")}/${index}`).then(json<ChunkView>),
+  chunk: (source: string, index: number) => fetch(`/api/chunks/${path(source)}/${index}`).then(json<ChunkView>),
+
+  documents: () => fetch("/api/documents").then(json<DocumentsResponse>),
+  documentChunks: (name: string) => fetch(`/api/documents/${path(name)}/chunks`).then(json<DocChunks>),
+  upload: (files: File[]) => {
+    const form = new FormData();
+    files.forEach((f) => form.append("files", f));
+    return fetch("/api/documents", { method: "POST", body: form }).then(json<UploadResponse>);
+  },
+  deleteDocument: (name: string) => fetch(`/api/documents/${path(name)}`, { method: "DELETE" }).then(json),
+  ingest: (rebuild = false) =>
+    fetch("/api/ingest", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ rebuild }) })
+      .then(json<IngestState>),
+  ingestStatus: () => fetch("/api/ingest").then(json<IngestState>),
+  search: (p: { q: string; k: number; mode: string; rerank: boolean }) =>
+    fetch(`/api/search?${new URLSearchParams({ q: p.q, k: String(p.k), mode: p.mode, rerank: String(p.rerank) })}`)
+      .then(json<SearchResponse>),
 };
 
 /** POST a question and yield Server-Sent Events as they arrive. */

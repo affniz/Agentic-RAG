@@ -2,6 +2,7 @@
 
     python -m uvicorn server.app:app --reload          # API on :8000 (serves frontend/dist if built)
     RAG_FAKE_LLM=1 python -m uvicorn server.app:app    # demo mode: no API key, no cost
+    Settings: RAG_DOCS (documents folder, default ./docs), RAG_INDEX, RAG_RERANK=0
 
 Chat responses stream as Server-Sent Events. Conversations live in memory for now
 (phase 1); they are lost when the server restarts.
@@ -26,15 +27,18 @@ from pydantic import BaseModel, Field
 
 from rag.agent import MODEL, PRICES, RagAgent, Usage
 from rag.store import KnowledgeBase
+from server.documents import make_router
 
 ROOT = Path(__file__).resolve().parents[1]
 INDEX_DIR = os.environ.get("RAG_INDEX", str(ROOT / ".rag_index"))
 FAKE_LLM = os.environ.get("RAG_FAKE_LLM") == "1"
 RERANK = os.environ.get("RAG_RERANK", "1") == "1"
 DIST = ROOT / "frontend" / "dist"
+DOCS_DIR = Path(os.environ.get("RAG_DOCS", str(ROOT / "docs")))
 
 app = FastAPI(title="Agentic RAG")
 kb = KnowledgeBase(INDEX_DIR, rerank=RERANK)
+app.include_router(make_router(kb, DOCS_DIR))
 
 
 def _make_client() -> Any:

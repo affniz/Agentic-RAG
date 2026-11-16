@@ -6,8 +6,10 @@ import hashlib
 import json
 import re
 import sys
+import threading
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Callable
 
 import chromadb
 from chromadb.utils import embedding_functions
@@ -149,6 +151,13 @@ def _tokenize(text: str) -> list[str]:
     return re.findall(r"[a-z0-9]+", text.lower())
 
 
+def _write_atomic(path: Path, text: str) -> None:
+    """Readers (and a crash mid-write) never see a half-written file."""
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(text)
+    tmp.replace(path)
+
+
 def _file_hash(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -188,6 +197,26 @@ class Reranker:
 # ---------------------------------------------------------------- store
 
 
+@dataclass(frozen=True)
+class _Index:
+    """Everything search reads, swapped as one object so a search never sees a half-updated index."""
+
+    chunks: list[Chunk]
+    by_id: dict[str, Chunk]
+    tokens: list[set[str]]
+    bm25: BM25Plus | None
+
+    @classmethod
+    def build(cls, chunks: list[Chunk]) -> "_Index":
+        tokenized = [_tokenize(c.indexed_text) for c in chunks]
+        # BM25Plus keeps IDF positive; BM25Okapi zeroes it out on tiny corpora.
+        return cls(chunks, {c.id: c for c in chunks}, [set(t) for t in tokenized],
+                   BM25Plus(tokenized) if chunks else None)
+
+
+ProgressFn = Callable[[str, int, int], None]  # (stage, done, total)
+
+
 class KnowledgeBase:
     def __init__(self, index_dir: str | Path = ".rag_index", rerank: bool = True, reranker: Reranker | None = None):
         self.index_dir = Path(index_dir)
@@ -199,11 +228,13 @@ class KnowledgeBase:
         self._chunks_file = self.index_dir / "chunks.json"
         self._manifest_file = self.index_dir / "manifest.json"
         self.reranker = reranker or (Reranker() if rerank else None)
-        self.chunks: list[Chunk] = []
-        self._by_id: dict[str, Chunk] = {}
-        self._bm25: BM25Plus | None = None
-        self._tokens: list[set[str]] = []
+        self._index = _Index.build([])
+        self._ingest_lock = threading.Lock()
         self._load()
+
+    @property
+    def chunks(self) -> list[Chunk]:
+        return self._index.chunks
 
     def _get_collection(self):
         return self._client.get_or_create_collection(
@@ -219,24 +250,28 @@ class KnowledgeBase:
 
     def _load(self) -> None:
         if self._chunks_file.exists() and self._manifest().get("version") == INDEX_VERSION:
-            self.chunks = [Chunk(**c) for c in json.loads(self._chunks_file.read_text())]
-        self._reindex()
+            self._index = _Index.build([Chunk(**c) for c in json.loads(self._chunks_file.read_text())])
 
-    def _reindex(self) -> None:
-        self._by_id = {c.id: c for c in self.chunks}
-        tokenized = [_tokenize(c.indexed_text) for c in self.chunks]
-        self._tokens = [set(t) for t in tokenized]
-        # BM25Plus keeps IDF positive; BM25Okapi zeroes it out on tiny corpora.
-        self._bm25 = BM25Plus(tokenized) if self.chunks else None
-
-    def ingest(self, docs_dir: str | Path, rebuild: bool = False) -> IngestReport:
-        """Sync the index with `docs_dir`: embed new/changed files, drop deleted ones."""
-        docs_dir = Path(docs_dir)
+    def indexed_files(self) -> dict[str, str]:
+        """{relative path: sha256} of the files the index was last built from."""
         manifest = self._manifest()
+        return manifest.get("files", {}) if manifest.get("version") == INDEX_VERSION else {}
+
+    def ingest(self, docs_dir: str | Path, rebuild: bool = False, on_progress: ProgressFn | None = None) -> IngestReport:
+        """Sync the index with `docs_dir`: embed new/changed files, drop deleted ones.
+
+        Searches keep working during an ingest and see the old index until the new one is swapped in.
+        """
+        with self._ingest_lock:
+            return self._ingest(Path(docs_dir), rebuild, on_progress or (lambda *_: None))
+
+    def _ingest(self, docs_dir: Path, rebuild: bool, progress: ProgressFn) -> IngestReport:
+        manifest = self._manifest()
+        kept = list(self.chunks)
         if rebuild or manifest.get("version") != INDEX_VERSION:
             self._client.delete_collection(COLLECTION)
             self._col = self._get_collection()
-            self.chunks, manifest = [], {}
+            kept, manifest = [], {}
         old_hashes: dict[str, str] = manifest.get("files", {})
 
         current: dict[str, Path] = {
@@ -252,25 +287,29 @@ class KnowledgeBase:
 
         if stale:
             self._col.delete(where={"source": {"$in": sorted(stale)}})
-            self.chunks = [c for c in self.chunks if c.source not in stale]
+            kept = [c for c in kept if c.source not in stale]
 
         fresh: list[Chunk] = []
-        for rel in added + updated:
+        to_read = added + updated
+        for n, rel in enumerate(to_read):
+            progress("reading", n, len(to_read))
             path = current[rel]
             fresh += chunk_document(rel, _read(path), markdown=path.suffix.lower() == ".md")
-        for start in range(0, len(fresh), 256):
-            batch = fresh[start : start + 256]
+        for start in range(0, len(fresh), 64):
+            progress("embedding", start, len(fresh))
+            batch = fresh[start : start + 64]
             self._col.add(
                 ids=[c.id for c in batch],
                 documents=[c.indexed_text for c in batch],
                 metadatas=[{"source": c.source, "index": c.index} for c in batch],
             )
+        progress("embedding", len(fresh), len(fresh))
 
-        self.chunks = sorted(self.chunks + fresh, key=lambda c: (c.source, c.index))
-        self._chunks_file.write_text(json.dumps([asdict(c) for c in self.chunks]))
-        self._manifest_file.write_text(json.dumps({"version": INDEX_VERSION, "files": new_hashes}))
-        self._reindex()
-        return IngestReport(added, updated, removed, len(current) - len(added) - len(updated), len(self.chunks))
+        chunks = sorted(kept + fresh, key=lambda c: (c.source, c.index))
+        _write_atomic(self._chunks_file, json.dumps([asdict(c) for c in chunks]))
+        _write_atomic(self._manifest_file, json.dumps({"version": INDEX_VERSION, "files": new_hashes}))
+        self._index = _Index.build(chunks)  # atomic swap
+        return IngestReport(added, updated, removed, len(current) - len(added) - len(updated), len(chunks))
 
     # -- retrieval
 
@@ -289,7 +328,8 @@ class KnowledgeBase:
         """
         if mode not in SEARCH_MODES:
             raise ValueError(f"mode must be one of {SEARCH_MODES}")
-        if not self.chunks:
+        idx = self._index  # one consistent snapshot for the whole search
+        if not idx.chunks:
             return []
         use_rerank = (self.reranker is not None) if rerank is None else (rerank and self.reranker is not None)
         pool = max(k * 4, 20)
@@ -297,25 +337,30 @@ class KnowledgeBase:
 
         if mode in ("bm25", "hybrid"):
             q_tokens = _tokenize(query)
-            scores = self._bm25.get_scores(q_tokens)
-            matching = (i for i in range(len(self.chunks)) if self._tokens[i].intersection(q_tokens))
+            scores = idx.bm25.get_scores(q_tokens)
+            matching = (i for i in range(len(idx.chunks)) if idx.tokens[i].intersection(q_tokens))
             order = sorted(matching, key=lambda i: -scores[i])
             rankings.append(
-                [self.chunks[i].id for i in order if source is None or self.chunks[i].source == source][:pool]
+                [idx.chunks[i].id for i in order if source is None or idx.chunks[i].source == source][:pool]
             )
         if mode in ("vector", "hybrid"):
-            res = self._col.query(
-                query_texts=[query],
-                n_results=min(pool, len(self.chunks)),
-                where={"source": source} if source else None,
-            )
-            rankings.append(res["ids"][0])
+            try:
+                res = self._col.query(
+                    query_texts=[query],
+                    n_results=min(pool, len(idx.chunks)),
+                    where={"source": source} if source else None,
+                )
+                rankings.append(res["ids"][0])
+            except Exception as e:  # e.g. the collection is being rebuilt; keyword results still work
+                if mode == "vector":
+                    raise
+                print(f"[search] vector search failed, using keyword results only: {e}", file=sys.stderr)
 
         fused: dict[str, float] = {}
         for ranking in rankings:
             for rank, cid in enumerate(ranking):
                 fused[cid] = fused.get(cid, 0.0) + 1.0 / (60 + rank)
-        candidates = [(self._by_id[cid], s) for cid, s in sorted(fused.items(), key=lambda kv: -kv[1]) if cid in self._by_id]
+        candidates = [(idx.by_id[cid], s) for cid, s in sorted(fused.items(), key=lambda kv: -kv[1]) if cid in idx.by_id]
 
         if use_rerank and len(candidates) > 1:
             scores = self.reranker.score(query, [c.indexed_text for c, _ in candidates[:pool]])
