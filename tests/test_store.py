@@ -154,3 +154,19 @@ def test_scanned_pdf_reported_empty_then_transcribed_once(tmp_path):
     kb.ingest(docs, rebuild=True)  # cached by file hash: not sent again
     assert calls == ["scan.pdf"] and "scan.pdf" in kb.sources()
     assert kb.ingest(docs).empty == [] and calls == ["scan.pdf"]  # and not retried once it has text
+
+
+def test_scanned_pdf_from_older_index_is_retried(tmp_path):
+    """Regression: a PDF indexed (with 0 chunks) before this version must still be transcribed."""
+    import json
+
+    docs = make_docs(tmp_path)
+    _blank_pdf(docs / "scan.pdf")
+    KnowledgeBase(tmp_path / "idx", rerank=False).ingest(docs)
+    manifest = tmp_path / "idx" / "manifest.json"
+    m = json.loads(manifest.read_text())
+    m.pop("empty", None)  # what an older version wrote
+    manifest.write_text(json.dumps(m))
+
+    kb = KnowledgeBase(tmp_path / "idx", rerank=False, pdf_ocr=lambda p: "# Scan\nMaths 95")
+    assert kb.ingest(docs).empty == [] and "scan.pdf" in kb.sources()

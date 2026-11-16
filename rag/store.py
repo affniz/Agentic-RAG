@@ -288,7 +288,6 @@ class KnowledgeBase:
             self._col = self._get_collection()
             kept, manifest = [], {}
         old_hashes: dict[str, str] = manifest.get("files", {})
-        old_empty: set[str] = set(manifest.get("empty", []))
 
         current: dict[str, Path] = {
             str(p.relative_to(docs_dir)): p
@@ -306,8 +305,10 @@ class KnowledgeBase:
             kept = [c for c in kept if c.source not in stale]
 
         fresh: list[Chunk] = []
-        # Files that produced no text last time get another try once OCR is available.
-        retry = [r for r in current if r in old_empty and r not in stale and r not in added
+        # PDFs that produced no chunks (e.g. scanned, indexed before OCR was enabled) get another
+        # try once OCR is available. Based on the index itself, so it also covers older indexes.
+        with_chunks = {c.source for c in kept}
+        retry = [r for r in current if r not in with_chunks and r not in stale and r not in added
                  and self.pdf_ocr is not None and r.lower().endswith(".pdf")]
         to_read = added + updated + retry
         empty: list[str] = []
@@ -331,9 +332,7 @@ class KnowledgeBase:
 
         chunks = sorted(kept + fresh, key=lambda c: (c.source, c.index))
         _write_atomic(self._chunks_file, json.dumps([asdict(c) for c in chunks]))
-        still_empty = sorted((old_empty & set(current)) - set(to_read) | set(empty))
-        _write_atomic(self._manifest_file, json.dumps({"version": INDEX_VERSION, "files": new_hashes,
-                                                       "empty": still_empty}))
+        _write_atomic(self._manifest_file, json.dumps({"version": INDEX_VERSION, "files": new_hashes}))
         self._index = _Index.build(chunks)  # atomic swap
         return IngestReport(added, updated, removed, len(current) - len(added) - len(updated), len(chunks), empty)
 
