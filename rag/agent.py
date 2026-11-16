@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 import anthropic
@@ -10,6 +11,15 @@ import anthropic
 from .store import KnowledgeBase
 
 MODEL = "claude-sonnet-5-5"
+
+# USD per million tokens: (input, output, cache read, cache write). List prices; used for
+# the per-question cost estimate only. If a refusal fallback serves a turn, the real price
+# is that of the fallback model.
+PRICES: dict[str, tuple[float, float, float, float]] = {
+    "claude-sonnet-5-5": (2.00, 10.00, 0.10, 2.50),
+    "claude-opus-5-5": (4.00, 20.00, 0.20, 5.00),
+    "claude-haiku-5-5": (0.10, 0.50, 0.01, 0.125),
+}
 
 SYSTEM_PROMPT = """\
 You are a research assistant that answers questions using a private knowledge base.
@@ -36,9 +46,9 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "search_knowledge_base",
         "description": (
-            "Hybrid keyword + semantic search over the knowledge base. Returns the best-matching "
-            "chunks, each labelled with its citation id [source#chunk]. Use focused queries; run "
-            "several searches for multi-part questions."
+            "Hybrid keyword + semantic search over the knowledge base, reranked for relevance. "
+            "Returns the best-matching chunks, each labelled with its citation id [source#chunk] "
+            "and section heading. Use focused queries; run several searches for multi-part questions."
         ),
         "input_schema": {
             "type": "object",
@@ -87,14 +97,14 @@ def build_handlers(kb: KnowledgeBase) -> dict[str, Callable[..., str]]:
         hits = kb.search(query, k=max(1, min(int(k), 10)), source=source or None)
         if not hits:
             return "No results."
-        return "\n\n".join(f"[{c.source}#{c.index}] (score {s:.3f})\n{c.text}" for c, s in hits)
+        return "\n\n".join(f"{c.label()}\n{c.text}" for c, _ in hits)
 
     def read_chunks(source: str, start: int, end: int) -> str:
         end = min(end, start + 7)
         chunks = kb.get_chunks(source, start, end)
         if not chunks:
             return f"No chunks {start}-{end} found for '{source}'."
-        return "\n\n".join(f"[{c.source}#{c.index}]\n{c.text}" for c in chunks)
+        return "\n\n".join(f"{c.label()}\n{c.text}" for c in chunks)
 
     return {
         "list_documents": list_documents,
@@ -103,14 +113,84 @@ def build_handlers(kb: KnowledgeBase) -> dict[str, Callable[..., str]]:
     }
 
 
+@dataclass
+class Usage:
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    api_calls: int = 0
+
+    def add(self, u: Any) -> None:
+        self.input_tokens += u.input_tokens or 0
+        self.output_tokens += u.output_tokens or 0
+        self.cache_read_tokens += getattr(u, "cache_read_input_tokens", 0) or 0
+        self.cache_write_tokens += getattr(u, "cache_creation_input_tokens", 0) or 0
+        self.api_calls += 1
+
+    def cost(self, model: str) -> float | None:
+        p = PRICES.get(model)
+        if p is None:
+            return None
+        return (
+            self.input_tokens * p[0]
+            + self.output_tokens * p[1]
+            + self.cache_read_tokens * p[2]
+            + self.cache_write_tokens * p[3]
+        ) / 1_000_000
+
+
+@dataclass
+class Answer:
+    text: str
+    usage: Usage
+    cost_usd: float | None
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    stop: str = "end_turn"  # end_turn | refusal | max_tokens | step_limit
+
+
+Event = dict[str, Any]
+
+
 class RagAgent:
-    def __init__(self, kb: KnowledgeBase, verbose: bool = True, max_steps: int = 12, effort: str = "medium"):
-        self.client = anthropic.Anthropic()
+    """Runs the tool loop. Pass `on_event` to observe progress (used by the CLI and the future UI).
+
+    Events: {"type": "tool_call", "name", "args"}, {"type": "tool_result", "name", "is_error", "chars"},
+            {"type": "answer", "text"}, {"type": "usage", "usage", "cost_usd"}
+    """
+
+    def __init__(
+        self,
+        kb: KnowledgeBase,
+        model: str = MODEL,
+        effort: str = "medium",
+        max_steps: int = 12,
+        on_event: Callable[[Event], None] | None = None,
+        client: Any = None,
+    ):
+        self.client = client or anthropic.Anthropic()
         self.handlers = build_handlers(kb)
-        self.verbose = verbose
-        self.max_steps = max_steps
+        self.model = model
         self.effort = effort
+        self.max_steps = max_steps
+        self.on_event = on_event or (lambda e: None)
         self.messages: list[dict[str, Any]] = []  # full history, kept across questions
+        self.total = Usage()
+
+    def _create(self, **extra: Any) -> Any:
+        return self.client.beta.messages.create(
+            model=self.model,
+            max_tokens=16000,
+            system=SYSTEM_PROMPT,
+            tools=TOOLS,
+            messages=self.messages,
+            output_config={"effort": self.effort},
+            cache_control={"type": "ephemeral"},  # cache the growing conversation prefix
+            # If a safety classifier declines, the API retries on a fallback model.
+            betas=["server-side-fallback-2026-07-01"],
+            fallbacks="default",
+            **extra,
+        )
 
     def _run_tool(self, name: str, args: dict[str, Any]) -> tuple[str, bool]:
         handler = self.handlers.get(name)
@@ -121,31 +201,34 @@ class RagAgent:
         except Exception as e:  # report tool failures to the model instead of crashing
             return f"Tool error: {type(e).__name__}: {e}", True
 
-    def ask(self, question: str) -> str:
+    def ask(self, question: str) -> Answer:
         self.messages.append({"role": "user", "content": question})
+        usage = Usage()
+        calls: list[dict[str, Any]] = []
+
+        def finish(text: str, stop: str) -> Answer:
+            self.total.input_tokens += usage.input_tokens
+            self.total.output_tokens += usage.output_tokens
+            self.total.cache_read_tokens += usage.cache_read_tokens
+            self.total.cache_write_tokens += usage.cache_write_tokens
+            self.total.api_calls += usage.api_calls
+            ans = Answer(text, usage, usage.cost(self.model), calls, stop)
+            self.on_event({"type": "answer", "text": text})
+            self.on_event({"type": "usage", "usage": usage, "cost_usd": ans.cost_usd})
+            return ans
 
         for _ in range(self.max_steps):
-            response = self.client.beta.messages.create(
-                model=MODEL,
-                max_tokens=16000,
-                system=SYSTEM_PROMPT,
-                tools=TOOLS,
-                messages=self.messages,
-                output_config={"effort": self.effort},
-                cache_control={"type": "ephemeral"},  # cache the growing conversation prefix
-                # If a safety classifier declines, the API retries on a fallback model.
-                betas=["server-side-fallback-2026-07-01"],
-                fallbacks="default",
-            )
+            response = self._create()
+            usage.add(response.usage)
             # Append the full content (thinking + tool_use blocks), never just the text.
             self.messages.append({"role": "assistant", "content": response.content})
 
             if response.stop_reason == "refusal":
-                return "(The model declined to answer this request.)"
+                return finish("(The model declined to answer this request.)", "refusal")
             if response.stop_reason == "max_tokens":
-                return _text(response) + "\n\n(Answer truncated: hit max_tokens.)"
+                return finish(_text(response) + "\n\n(Answer truncated: hit max_tokens.)", "max_tokens")
             if response.stop_reason != "tool_use":
-                return _text(response) or "(no text in response)"
+                return finish(_text(response) or "(no text in response)", "end_turn")
 
             # Run every tool call from this turn; return all results in ONE user message.
             results = []
@@ -153,32 +236,21 @@ class RagAgent:
                 if block.type != "tool_use":
                     continue
                 args = block.input if isinstance(block.input, dict) else json.loads(block.input)
-                if self.verbose:
-                    shown = ", ".join(f"{k}={v!r}" for k, v in args.items())
-                    print(f"  -> {block.name}({shown})")
+                calls.append({"name": block.name, "args": args})
+                self.on_event({"type": "tool_call", "name": block.name, "args": args})
                 output, is_error = self._run_tool(block.name, args)
+                self.on_event({"type": "tool_result", "name": block.name, "is_error": is_error, "chars": len(output)})
                 results.append(
                     {"type": "tool_result", "tool_use_id": block.id, "content": output, "is_error": is_error}
                 )
             self.messages.append({"role": "user", "content": results})
 
         # Out of steps: ask for a final answer with what it has (no more tools).
-        self.messages.append(
-            {"role": "user", "content": "Stop searching and answer now with the evidence you have."}
-        )
-        response = self.client.beta.messages.create(
-            model=MODEL,
-            max_tokens=16000,
-            system=SYSTEM_PROMPT,
-            tools=TOOLS,
-            tool_choice={"type": "none"},
-            messages=self.messages,
-            output_config={"effort": self.effort},
-            betas=["server-side-fallback-2026-07-01"],
-            fallbacks="default",
-        )
+        self.messages.append({"role": "user", "content": "Stop searching and answer now with the evidence you have."})
+        response = self._create(tool_choice={"type": "none"})
+        usage.add(response.usage)
         self.messages.append({"role": "assistant", "content": response.content})
-        return _text(response) or "(no text in response)"
+        return finish(_text(response) or "(no text in response)", "step_limit")
 
     def reset(self) -> None:
         self.messages = []

@@ -1,3 +1,5 @@
 .rag_index/
 .venv/
 __pycache__/
+evals/results/
+.pytest_cache/

@@ -1,0 +1,79 @@
+from rag.store import KnowledgeBase, _chunk, _sections, chunk_document
+
+
+def test_chunks_respect_size_and_keep_all_text():
+    text = "\n\n".join(f"Paragraph {i} " + "word " * 60 for i in range(20)) + "\n\n" + "x" * 2000
+    chunks = _chunk(text, size=800, overlap=150)
+    assert max(map(len, chunks)) <= 800
+    joined = "".join(chunks)
+    assert all(f"Paragraph {i} " in joined for i in range(20))
+
+
+def test_markdown_sections_track_heading_path():
+    md = "# Title\nintro\n## A\nalpha\n### A1\ndeep\n## B\nbeta\n```\n# not a heading\n```\n"
+    secs = dict((body.strip().splitlines()[0], path) for path, body in _sections(md, markdown=True))
+    assert secs["intro"] == "Title"
+    assert secs["alpha"] == "Title > A"
+    assert secs["deep"] == "Title > A > A1"
+    assert secs["beta"] == "Title > B"  # A1 popped, code-fence line not treated as heading
+
+
+def test_chunk_document_labels():
+    chunks = chunk_document("p.md", "# Policy\n## Carry-over\nUp to 5 days.", markdown=True)
+    assert chunks[0].section == "Policy > Carry-over"
+    assert chunks[0].label() == "[p.md#0] (Policy > Carry-over)"
+    assert chunks[0].indexed_text.startswith("Policy > Carry-over\n")
+
+
+def make_docs(tmp_path):
+    d = tmp_path / "docs"
+    d.mkdir()
+    (d / "vacation.md").write_text("# Vacation\n## Carry-over\nUp to 5 unused days carry over until March 31.")
+    (d / "travel.txt").write_text("Hotel cap is $350 per night in London.")
+    return d
+
+
+def test_incremental_ingest(tmp_path):
+    docs = make_docs(tmp_path)
+    kb = KnowledgeBase(tmp_path / "idx", rerank=False)
+    r = kb.ingest(docs)
+    assert (len(r.added), r.unchanged) == (2, 0)
+
+    r = kb.ingest(docs)
+    assert (len(r.added), len(r.updated), r.unchanged) == (0, 0, 2)
+
+    (docs / "travel.txt").write_text("Hotel cap is $400 per night in London.")
+    (docs / "vacation.md").unlink()
+    r = kb.ingest(docs)
+    assert r.updated == ["travel.txt"] and r.removed == ["vacation.md"]
+    assert set(kb.sources()) == {"travel.txt"}
+    assert "$400" in kb.search("london hotel", k=1)[0][0].text
+
+    # Reloading from disk gives the same state.
+    kb2 = KnowledgeBase(tmp_path / "idx", rerank=False)
+    assert [c.id for c in kb2.chunks] == [c.id for c in kb.chunks]
+
+
+def test_search_modes_and_source_filter(tmp_path):
+    kb = KnowledgeBase(tmp_path / "idx", rerank=False)
+    kb.ingest(make_docs(tmp_path))
+    for mode in ("bm25", "vector", "hybrid"):
+        top = kb.search("how many vacation days carry over", k=1, mode=mode)[0][0]
+        assert top.source == "vacation.md", mode
+    only = kb.search("vacation days", k=5, source="travel.txt")
+    assert {c.source for c, _ in only} == {"travel.txt"}
+
+
+class FakeReranker:
+    available = True
+
+    def score(self, query, docs):
+        return [1.0 if "London" in d else 0.0 for d in docs]
+
+
+def test_reranker_reorders(tmp_path):
+    kb = KnowledgeBase(tmp_path / "idx", reranker=FakeReranker())
+    kb.ingest(make_docs(tmp_path))
+    top = kb.search("vacation carry over", k=1)[0][0]
+    assert top.source == "travel.txt"  # fake reranker prefers the London chunk
+    assert kb.search("vacation carry over", k=1, rerank=False)[0][0].source == "vacation.md"
