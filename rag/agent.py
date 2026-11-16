@@ -9,7 +9,7 @@ import anthropic
 
 from .store import KnowledgeBase
 
-MODEL = "claude-opus-5-5"
+MODEL = "claude-sonnet-5-5"
 
 SYSTEM_PROMPT = """\
 You are a research assistant that answers questions using a private knowledge base.

@@ -7,7 +7,7 @@ reads surrounding chunks for context, and answers with inline citations like `[p
 ## How it works
 
 ```
-question ─► Claude (claude-opus-5-5) ──tool calls──► list_documents
+question ─► Claude (claude-sonnet-5-5) ──tool calls──► list_documents
                ▲                                     search_knowledge_base  (BM25 + vectors, RRF fusion)
                └────────── tool results ◄─────────── read_chunks            (neighbouring context)
             ... loops until it has enough evidence ...
@@ -43,6 +43,7 @@ Add `-q` to `ask` / `chat` to hide the tool-call trace.
 
 ## Settings worth knowing
 
+- **Model** – `MODEL` in `rag/agent.py` (default `claude-sonnet-5-5`, ~$0.02–0.05 per typical question). Use `claude-opus-5-5` for harder multi-hop questions or `claude-haiku-5-5` for the lowest cost.
 - **Effort** – `RagAgent(effort="medium")`. Raise it to `"high"` for harder multi-hop questions, lower to `"low"` for speed.
 - **Refusal fallback** – requests use `fallbacks="default"` (beta `server-side-fallback-2026-07-01`): if a safety classifier declines, the API reruns the request on a fallback model. Remove those two arguments in `rag/agent.py` to turn it off.
 - **Prompt caching** – the conversation prefix is cached automatically, so the agent's repeated calls within one question cost less.
