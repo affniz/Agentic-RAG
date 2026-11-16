@@ -41,7 +41,7 @@ class IngestJob:
         try:
             r = self.kb.ingest(self.docs_dir, rebuild=rebuild, on_progress=progress)
             self.state.update(state="done", report={"added": r.added, "updated": r.updated, "removed": r.removed,
-                                                    "unchanged": r.unchanged, "chunks": r.chunks})
+                                                    "unchanged": r.unchanged, "chunks": r.chunks, "empty": r.empty})
         except Exception as e:  # surfaced in the UI
             self.state.update(state="error", error=f"{type(e).__name__}: {e}")
         finally:
@@ -84,13 +84,15 @@ def make_router(kb: KnowledgeBase, docs_dir: Path) -> APIRouter:
             stat = path.stat()
             digest = hashlib.sha256(path.read_bytes()).hexdigest()
             status = "new" if rel not in indexed else ("indexed" if indexed[rel] == digest else "changed")
+            if status == "indexed" and not counts.get(rel):
+                status = "empty"  # indexed, but no text could be extracted
             rows.append({"name": rel, "type": path.suffix.lower().lstrip("."), "size": stat.st_size,
                          "modified": stat.st_mtime, "chunks": counts.get(rel, 0), "status": status})
         on_disk = {r["name"] for r in rows}
         rows += [{"name": rel, "type": Path(rel).suffix.lstrip("."), "size": None, "modified": None,
                   "chunks": counts.get(rel, 0), "status": "deleted"} for rel in sorted(indexed) if rel not in on_disk]
-        return {"documents": rows, "chunks": len(kb.chunks), "ingest": ingest_state,
-                "needs_ingest": any(r["status"] != "indexed" for r in rows)}
+        return {"documents": rows, "chunks": len(kb.chunks), "ingest": ingest_state, "ocr": kb.pdf_ocr is not None,
+                "needs_ingest": any(r["status"] not in ("indexed", "empty") for r in rows)}
 
     @router.post("/documents")
     async def upload(files: list[UploadFile]) -> dict[str, Any]:

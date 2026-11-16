@@ -7,7 +7,7 @@ import json
 import re
 import sys
 import threading
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable
 
@@ -53,6 +53,7 @@ class IngestReport:
     removed: list[str]
     unchanged: int
     chunks: int
+    empty: list[str] = field(default_factory=list)  # files that yielded no text (e.g. scanned PDFs)
 
 
 # ---------------------------------------------------------------- loading & chunking
@@ -62,6 +63,12 @@ def _read(path: Path) -> str:
     if path.suffix.lower() == ".pdf":
         return "\n\n".join(page.extract_text() or "" for page in PdfReader(path).pages)
     return path.read_text(encoding="utf-8", errors="replace")
+
+
+def _lacks_text_layer(path: Path, text: str) -> bool:
+    """A PDF with almost no extractable text is most likely scanned images of pages."""
+    pages = max(1, len(PdfReader(path).pages))
+    return len(text.strip()) < 20 * pages
 
 
 def _sections(text: str, markdown: bool) -> list[tuple[str, str]]:
@@ -218,8 +225,16 @@ ProgressFn = Callable[[str, int, int], None]  # (stage, done, total)
 
 
 class KnowledgeBase:
-    def __init__(self, index_dir: str | Path = ".rag_index", rerank: bool = True, reranker: Reranker | None = None):
+    def __init__(
+        self,
+        index_dir: str | Path = ".rag_index",
+        rerank: bool = True,
+        reranker: Reranker | None = None,
+        pdf_ocr: Callable[[Path], str] | None = None,
+    ):
+        """pdf_ocr: optional fallback that returns text for PDFs without a text layer (see rag/ocr.py)."""
         self.index_dir = Path(index_dir)
+        self.pdf_ocr = pdf_ocr
         self.index_dir.mkdir(parents=True, exist_ok=True)
         self._client = chromadb.PersistentClient(path=str(self.index_dir / "chroma"))
         # all-MiniLM-L6-v2 run locally via ONNX - no API key, no torch.
@@ -273,6 +288,7 @@ class KnowledgeBase:
             self._col = self._get_collection()
             kept, manifest = [], {}
         old_hashes: dict[str, str] = manifest.get("files", {})
+        old_empty: set[str] = set(manifest.get("empty", []))
 
         current: dict[str, Path] = {
             str(p.relative_to(docs_dir)): p
@@ -290,11 +306,19 @@ class KnowledgeBase:
             kept = [c for c in kept if c.source not in stale]
 
         fresh: list[Chunk] = []
-        to_read = added + updated
+        # Files that produced no text last time get another try once OCR is available.
+        retry = [r for r in current if r in old_empty and r not in stale and r not in added
+                 and self.pdf_ocr is not None and r.lower().endswith(".pdf")]
+        to_read = added + updated + retry
+        empty: list[str] = []
         for n, rel in enumerate(to_read):
             progress("reading", n, len(to_read))
             path = current[rel]
-            fresh += chunk_document(rel, _read(path), markdown=path.suffix.lower() == ".md")
+            text, markdown = self._extract(path, new_hashes[rel])
+            doc_chunks = chunk_document(rel, text, markdown=markdown)
+            if not doc_chunks:
+                empty.append(rel)
+            fresh += doc_chunks
         for start in range(0, len(fresh), 64):
             progress("embedding", start, len(fresh))
             batch = fresh[start : start + 64]
@@ -307,9 +331,27 @@ class KnowledgeBase:
 
         chunks = sorted(kept + fresh, key=lambda c: (c.source, c.index))
         _write_atomic(self._chunks_file, json.dumps([asdict(c) for c in chunks]))
-        _write_atomic(self._manifest_file, json.dumps({"version": INDEX_VERSION, "files": new_hashes}))
+        still_empty = sorted((old_empty & set(current)) - set(to_read) | set(empty))
+        _write_atomic(self._manifest_file, json.dumps({"version": INDEX_VERSION, "files": new_hashes,
+                                                       "empty": still_empty}))
         self._index = _Index.build(chunks)  # atomic swap
-        return IngestReport(added, updated, removed, len(current) - len(added) - len(updated), len(chunks))
+        return IngestReport(added, updated, removed, len(current) - len(added) - len(updated), len(chunks), empty)
+
+    def _extract(self, path: Path, digest: str) -> tuple[str, bool]:
+        """(text, is_markdown) for one file, using the OCR fallback for scanned PDFs if configured."""
+        text = _read(path)
+        if path.suffix.lower() != ".pdf":
+            return text, path.suffix.lower() == ".md"
+        if not _lacks_text_layer(path, text) or self.pdf_ocr is None:
+            return text, False
+        cache = self.index_dir / "ocr" / f"{digest}.md"
+        if cache.exists():
+            return cache.read_text(), True
+        text = self.pdf_ocr(path)
+        if text.strip():
+            cache.parent.mkdir(exist_ok=True)
+            _write_atomic(cache, text)
+        return text, True
 
     # -- retrieval
 

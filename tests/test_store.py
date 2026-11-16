@@ -119,3 +119,38 @@ def test_manifest_readable_during_ingest(tmp_path):
     stop.set()
     t.join()
     assert errors == []
+
+
+def _blank_pdf(path, pages=1):
+    from pypdf import PdfWriter
+
+    w = PdfWriter()
+    for _ in range(pages):
+        w.add_blank_page(width=595, height=842)
+    with open(path, "wb") as f:
+        w.write(f)
+
+
+def test_scanned_pdf_reported_empty_then_transcribed_once(tmp_path):
+    docs = make_docs(tmp_path)
+    _blank_pdf(docs / "scan.pdf", pages=2)
+
+    kb = KnowledgeBase(tmp_path / "idx", rerank=False)
+    r = kb.ingest(docs)
+    assert r.empty == ["scan.pdf"] and "scan.pdf" not in kb.sources()
+
+    calls = []
+
+    def fake_ocr(path):
+        calls.append(path.name)
+        return "# Report Card 2020\n\n## Marks\n| Subject | Marks |\n|---|---|\n| Maths | 95 |"
+
+    kb = KnowledgeBase(tmp_path / "idx", rerank=False, pdf_ocr=fake_ocr)
+    r = kb.ingest(docs)  # file unchanged, but it was empty and OCR is now available -> retried
+    assert r.empty == [] and calls == ["scan.pdf"]
+    hit = kb.search("maths marks", k=1)[0][0]
+    assert hit.source == "scan.pdf" and hit.section == "Report Card 2020 > Marks"
+
+    kb.ingest(docs, rebuild=True)  # cached by file hash: not sent again
+    assert calls == ["scan.pdf"] and "scan.pdf" in kb.sources()
+    assert kb.ingest(docs).empty == [] and calls == ["scan.pdf"]  # and not retried once it has text

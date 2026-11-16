@@ -21,6 +21,7 @@ const STATUS: Record<DocStatus, { label: string; cls: string; hint: string }> = 
   indexed: { label: "Indexed", cls: "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300", hint: "Searchable and up to date" },
   changed: { label: "Changed", cls: "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300", hint: "Edited since the last index - re-index to update" },
   new: { label: "Not indexed", cls: "bg-sky-100 text-sky-800 dark:bg-sky-900/40 dark:text-sky-300", hint: "Not searchable yet - re-index to add it" },
+  empty: { label: "No text found", cls: "bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300", hint: "Indexed, but no text could be extracted (most likely a scanned PDF), so it isn't searchable" },
   deleted: { label: "Deleted", cls: "bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300", hint: "File removed but still in the index - re-index to drop it" },
 };
 
@@ -131,6 +132,7 @@ export function DocumentsPage({ health, onIndexChanged }: { health: Health | nul
 
           <IngestBanner ingest={ingest} />
           {error && <Alert tone="error">{error}</Alert>}
+          {!running && <EmptyFilesNotice docs={docs} ocr={!!data?.ocr} onReindex={() => reindex(false)} />}
           {data?.needs_ingest && !running && (
             <Alert tone="info">Some documents aren't indexed yet or have changed. Re-index to make them searchable.</Alert>
           )}
@@ -203,7 +205,7 @@ function IngestBanner({ ingest }: { ingest: IngestState }) {
   if (ingest.state === "done" && ingest.report && ingest.finished_at && Date.now() / 1000 - ingest.finished_at < 600) {
     const r = ingest.report;
     const parts = [r.added.length && `${r.added.length} added`, r.updated.length && `${r.updated.length} updated`,
-      r.removed.length && `${r.removed.length} removed`].filter(Boolean);
+      r.removed.length && `${r.removed.length} removed`, r.empty?.length && `${r.empty.length} with no text`].filter(Boolean);
     return (
       <div className="mt-4 flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-300" role="status">
         {Icon.check()} Index up to date{parts.length ? `: ${parts.join(", ")}` : " - nothing changed"}. {r.chunks} chunks.
@@ -211,6 +213,34 @@ function IngestBanner({ ingest }: { ingest: IngestState }) {
     );
   }
   return null;
+}
+
+function EmptyFilesNotice({ docs, ocr, onReindex }: { docs: DocumentsResponse["documents"]; ocr: boolean; onReindex: () => void }) {
+  const empty = docs.filter((d) => d.status === "empty");
+  if (!empty.length) return null;
+  const names = empty.map((d) => d.name).join(", ");
+  const pdfs = empty.some((d) => d.type === "pdf");
+  return (
+    <div className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2.5 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300" role="status">
+      <p>
+        <span className="font-medium">No searchable text in {empty.length === 1 ? "1 file" : `${empty.length} files`}:</span> {names}.
+        {pdfs && (empty.length === 1
+          ? " This is most likely a scanned PDF: images of pages with no text layer."
+          : " These are most likely scanned PDFs: images of pages with no text layer.")}
+      </p>
+      {pdfs && (ocr ? (
+        <p className="mt-1.5">
+          Transcription is on.{" "}
+          <button onClick={onReindex} className="font-medium underline">Re-index</button> to transcribe {empty.length === 1 ? "it" : "them"} with Claude.
+        </p>
+      ) : (
+        <p className="mt-1.5">
+          To make them searchable, restart the server with <code className="rounded bg-red-100 px-1 dark:bg-red-900/50">RAG_OCR=1</code> and
+          re-index. Claude then transcribes scanned PDFs - each file is sent to the Anthropic API once.
+        </p>
+      ))}
+    </div>
+  );
 }
 
 function DropZone({ onFiles, busy }: { onFiles: (f: File[]) => void; busy: boolean }) {

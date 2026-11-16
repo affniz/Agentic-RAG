@@ -39,6 +39,8 @@ def main() -> None:
     s = sub.add_parser("ingest")
     s.add_argument("docs_dir", nargs="?", default="docs")
     s.add_argument("--rebuild", action="store_true", help="re-embed everything")
+    s.add_argument("--ocr", action="store_true",
+                   help="transcribe scanned PDFs (no text layer) with Claude - sends those PDFs to the API")
 
     s = sub.add_parser("search")
     s.add_argument("query")
@@ -68,12 +70,20 @@ def main() -> None:
     s.add_argument("--repeats", type=int, default=1, help="run everything N times; report mean, range, unstable questions")
 
     args = p.parse_args()
-    kb = KnowledgeBase(args.index, rerank=not args.no_rerank)
+    ocr = None
+    if getattr(args, "ocr", False):
+        from rag.ocr import claude_pdf_transcriber
+
+        ocr = claude_pdf_transcriber()
+    kb = KnowledgeBase(args.index, rerank=not args.no_rerank, pdf_ocr=ocr)
 
     if args.cmd == "ingest":
         r = kb.ingest(args.docs_dir, rebuild=args.rebuild)
         print(f"Index: {r.chunks} chunks from {len(kb.sources())} documents "
               f"(added {len(r.added)}, updated {len(r.updated)}, removed {len(r.removed)}, unchanged {r.unchanged}).")
+        for name in r.empty:
+            hint = "" if args.ocr or not name.lower().endswith(".pdf") else " Scanned PDF? Re-run with --ocr."
+            print(f"Warning: no text found in {name} - it isn't searchable.{hint}")
         if kb.reranker is not None:
             print("Loading reranker (downloads ~90 MB the first time)...")
             print("Reranker ready." if kb.reranker.warm() else "Reranker unavailable; search will run without it.")

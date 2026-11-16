@@ -77,6 +77,7 @@ python -m uvicorn server.app:app --port 8000           # then open http://localh
   fake model: no API key, no cost. Handy for UI work.
 - **Frontend dev with hot reload:** run the server as above, then `cd frontend && npm run dev` and open
   http://localhost:5173 (API calls are proxied to :8000).
+- **Scanned PDFs** (images of pages, no text layer) can't be read by the text extractor; they show as "No text found" and aren't searchable. Start the server with `RAG_OCR=1` (or run `python main.py ingest --ocr`) and re-index to have Claude Haiku transcribe them. Each such PDF is sent to the Anthropic API once; the transcription is cached in the index folder.
 - Other settings: `RAG_DOCS` (documents folder, default `./docs`), `RAG_INDEX` (index directory), `RAG_RERANK=0` (turn off the reranker).
 - Conversations are kept in memory for now and are lost when the server restarts.
 

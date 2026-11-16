@@ -44,6 +44,7 @@ export type Health = {
   models: string[];
   demo_mode: boolean;
   reranker: boolean;
+  ocr: boolean;
 };
 
 export type ChunkView = {
@@ -63,7 +64,7 @@ export type ChatEvent =
   | { type: "error"; message: string }
   | { type: "done"; seconds: number; conversation: ConversationSummary };
 
-export type DocStatus = "indexed" | "changed" | "new" | "deleted";
+export type DocStatus = "indexed" | "changed" | "new" | "deleted" | "empty";
 
 export type DocumentRow = {
   name: string;
@@ -83,7 +84,7 @@ export type IngestState = {
   started_at?: number;
   finished_at?: number;
   error?: string;
-  report?: { added: string[]; updated: string[]; removed: string[]; unchanged: number; chunks: number };
+  report?: { added: string[]; updated: string[]; removed: string[]; unchanged: number; chunks: number; empty?: string[] };
 };
 
 export type DocumentsResponse = {
@@ -91,6 +92,7 @@ export type DocumentsResponse = {
   chunks: number;
   ingest: IngestState;
   needs_ingest: boolean;
+  ocr: boolean;
 };
 
 export type UploadResponse = {

@@ -2,7 +2,8 @@
 
     python -m uvicorn server.app:app --reload          # API on :8000 (serves frontend/dist if built)
     RAG_FAKE_LLM=1 python -m uvicorn server.app:app    # demo mode: no API key, no cost
-    Settings: RAG_DOCS (documents folder, default ./docs), RAG_INDEX, RAG_RERANK=0
+    Settings: RAG_DOCS (documents folder, default ./docs), RAG_INDEX, RAG_RERANK=0,
+              RAG_OCR=1 (transcribe scanned PDFs with Claude)
 
 Chat responses stream as Server-Sent Events. Conversations live in memory for now
 (phase 1); they are lost when the server restarts.
@@ -33,11 +34,20 @@ ROOT = Path(__file__).resolve().parents[1]
 INDEX_DIR = os.environ.get("RAG_INDEX", str(ROOT / ".rag_index"))
 FAKE_LLM = os.environ.get("RAG_FAKE_LLM") == "1"
 RERANK = os.environ.get("RAG_RERANK", "1") == "1"
+OCR = os.environ.get("RAG_OCR") == "1"  # transcribe scanned PDFs with Claude (sends them to the API)
 DIST = ROOT / "frontend" / "dist"
 DOCS_DIR = Path(os.environ.get("RAG_DOCS", str(ROOT / "docs")))
 
 app = FastAPI(title="Agentic RAG")
-kb = KnowledgeBase(INDEX_DIR, rerank=RERANK)
+def _make_ocr() -> Any:
+    if not OCR:
+        return None
+    from rag.ocr import claude_pdf_transcriber
+
+    return claude_pdf_transcriber()
+
+
+kb = KnowledgeBase(INDEX_DIR, rerank=RERANK, pdf_ocr=_make_ocr())
 app.include_router(make_router(kb, DOCS_DIR))
 
 
@@ -115,6 +125,7 @@ def health() -> dict[str, Any]:
         "models": list(PRICES),
         "demo_mode": FAKE_LLM,
         "reranker": bool(kb.reranker and kb.reranker.available),
+        "ocr": kb.pdf_ocr is not None,
     }
 
 

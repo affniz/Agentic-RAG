@@ -79,3 +79,15 @@ def test_rejects_path_traversal_and_concurrent_ingest(client):
     if c.get("/api/ingest").json()["state"] == "running":
         assert c.post("/api/ingest", json={}).status_code == 409
     wait_ingest(c)
+
+
+def test_scanned_pdf_shows_no_text_status(client):
+    from tests.test_store import _blank_pdf
+
+    _blank_pdf(client.docs / "scan.pdf")
+    client.post("/api/ingest", json={})
+    st = wait_ingest(client)
+    assert st["report"]["empty"] == ["scan.pdf"]
+    body = client.get("/api/documents").json()
+    assert {d["name"]: d["status"] for d in body["documents"]}["scan.pdf"] == "empty"
+    assert body["ocr"] is False and body["needs_ingest"] is False
