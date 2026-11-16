@@ -104,6 +104,9 @@ needed to answer each question the system actually saw.
 | Sonnet 5.5, one-shot k=5 | 70% | 33% | 84% | 1.0 | 3.3s | $0.0044 |
 | Sonnet 5.5, one-shot k=15 | 78% | 42% | 90% | 1.0 | 7.8s | $0.0070 |
 | Sonnet 5.5, agentic | 98% | 100% | 99% | 2.6 | 7.0s | $0.0138 |
+| **With document notes:** | | | | | | |
+| Haiku 5.5, one-shot k=5 | 72% | 33% | 84% | 1.0 | 3.2s | $0.0003 |
+| Haiku 5.5, agentic | **100%** | 100% | 99% | 3.0 | 7.4s | $0.0010 |
 
 The agent loop is worth more than the bigger model: Haiku with the loop beats Sonnet without it
 by 25 points at a fifth of the cost. More context doesn't close the gap - the missing facts in
@@ -113,7 +116,7 @@ One question (`tmp-london-jan`, a past date under a superseded policy) failed fo
 The cause was chunking, not the model: the agent retrieved each policy's hotel table, but the
 sentence saying when each policy applied sat in a different chunk, so it saw two undated tables and
 picked the newer one. Every chunk now carries its document's intro (status, effective dates, scope) -
-see `Chunk.render()`. A search rule for past dates was also tried first (`agentic`, versus
+see `Chunk.render()`. That took date-dependent questions from 83% to 100% for *both* the agent and the one-shot baseline (the bottom two rows), while multi-step stayed at 100% vs 33%. A search rule for past dates was also tried first (`agentic`, versus
 `agentic-v1` without it): it improved evidence retrieval (83% → 95% on `evals/past-dates`) and
 citations, but not accuracy (86% for both).
 

@@ -87,3 +87,15 @@ def test_agent_prompt_versions(kb):
     new = make_system("agentic", kb, ScriptedClient([]), "claude-haiku-5-5", "medium", "2026-11-16", 5)
     old = make_system("agentic-v1", kb, ScriptedClient([]), "claude-haiku-5-5", "medium", "2026-11-16", 5)
     assert "past one" in new.system and "past one" not in old.system
+
+
+def test_evidence_recall_counts_document_notes(tmp_path):
+    from rag.evaluate import _evidence_recall
+
+    d = tmp_path / "docs"
+    d.mkdir()
+    (d / "p.md").write_text("# Policy 2025\nIn force until 2026-02-28.\n\n## Hotels\nTier 1: $320 per night")
+    kb = KnowledgeBase(tmp_path / "idx", rerank=False)
+    kb.ingest(d)
+    # Only the Hotels chunk was retrieved, but its note shows the validity window.
+    assert _evidence_recall(kb, ["p.md#1"], ["In force until 2026-02-28", "Tier 1: $320"]) == 1.0

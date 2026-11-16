@@ -64,9 +64,11 @@ def _norm(s: str) -> str:
 
 
 def _evidence_recall(kb: KnowledgeBase, keys: list[str], evidence: list[str]) -> float | None:
+    """Share of evidence snippets that appeared in what the system showed the model."""
     if not evidence:
         return None
-    by_key = {f"{c.source}#{c.index}": _norm(c.indexed_text) for c in kb.chunks}
+    # Everything the model was shown for each chunk: section path, document note and text.
+    by_key = {f"{c.source}#{c.index}": _norm(f"{c.indexed_text}\n{c.doc_note}") for c in kb.chunks}
     texts = [by_key[k] for k in keys if k in by_key]
     return sum(any(_norm(e) in t for t in texts) for e in evidence) / len(evidence)
 
