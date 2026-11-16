@@ -1,0 +1,6 @@
+{
+  "name": "past-dates",
+  "docs": "../hard/docs",
+  "today": "2026-11-16",
+  "description": "Held-out check for the hard set: questions about past dates, where the answer comes from a superseded or not-yet-amended rule. Written after the agent's tmp-london-jan failure; not used to tune prompts."
+}

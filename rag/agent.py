@@ -12,7 +12,8 @@ import anthropic
 
 from .store import KnowledgeBase
 
-MODEL = "claude-sonnet-5-5"
+# Haiku 5.5 matched Sonnet 5.5 within one question on evals/hard (95% vs 98%) at ~1/16 the cost.
+MODEL = "claude-haiku-5-5"
 
 # USD per million tokens: (input, output, cache read, cache write). List prices; used for
 # the per-question cost estimate only. If a refusal fallback serves a turn, the real price
@@ -36,7 +37,7 @@ is about, and mention when an exception or newer rule changes the answer.
 - Cite every factual claim inline as [source#chunk], e.g. [policy.md#2].
 - Keep answers concise and direct."""
 
-AGENT_INSTRUCTIONS = """\
+AGENT_INSTRUCTIONS_V1 = """\
 You are a research assistant that answers questions using a private knowledge base.
 You have tools to list the documents, search them, and read chunks in full.
 
@@ -48,6 +49,13 @@ or use synonyms when a search misses.
 rotation), look that fact up too instead of assuming it.
 - When a hit looks relevant but cut off, or a list may continue, read the neighbouring chunks.
 - Stop searching once you have enough evidence; don't repeat searches that already worked."""
+
+# v2: when a question is about a specific (especially past) date, find the version of the rule
+# in force then. v1 tended to stop at the current policy. Compare with --systems agentic-v1,agentic.
+AGENT_INSTRUCTIONS = AGENT_INSTRUCTIONS_V1 + """
+- When a question is about a specific date, especially a past one, find out which version of \
+a rule was in force on that date: look for earlier versions, effective dates, amendments and \
+decisions, rather than stopping at the current version."""
 
 
 def system_prompt(instructions: str, today: str) -> str:
@@ -199,12 +207,13 @@ class RagAgent:
         on_event: Callable[[Event], None] | None = None,
         client: Any = None,
         today: str | None = None,
+        instructions: str = AGENT_INSTRUCTIONS,
     ):
         self.client = client or anthropic.Anthropic()
         self.kb = kb
         self._seen: list[str] = []
         self.handlers = build_handlers(kb, self._seen)
-        self.system = system_prompt(AGENT_INSTRUCTIONS, today or datetime.date.today().isoformat())
+        self.system = system_prompt(instructions, today or datetime.date.today().isoformat())
         self.model = model
         self.effort = effort
         self.max_steps = max_steps

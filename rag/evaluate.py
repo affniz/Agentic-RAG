@@ -19,12 +19,12 @@ from typing import Any, Callable, Literal
 import anthropic
 from pydantic import BaseModel
 
-from .agent import Answer, RagAgent, Usage
+from .agent import AGENT_INSTRUCTIONS_V1, Answer, RagAgent, Usage
 from .baseline import NaiveRag
 from .store import KnowledgeBase
 
 JUDGE_MODEL = "claude-haiku-5-5"
-SYSTEMS = ("agentic", "naive")
+SYSTEMS = ("agentic", "agentic-v1", "naive")
 
 
 @dataclass
@@ -153,6 +153,8 @@ def make_system(name: str, kb: KnowledgeBase, client: Any, model: str, effort: s
                 naive_k: int) -> Any:
     if name == "agentic":
         return RagAgent(kb, model=model, effort=effort, client=client, today=today)
+    if name == "agentic-v1":  # previous agent instructions, kept for A/B comparison
+        return RagAgent(kb, model=model, effort=effort, client=client, today=today, instructions=AGENT_INSTRUCTIONS_V1)
     if name == "naive":
         return NaiveRag(kb, model=model, effort=effort, k=naive_k, client=client, today=today)
     raise ValueError(f"unknown system {name!r}; choose from {SYSTEMS}")

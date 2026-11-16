@@ -77,3 +77,13 @@ def test_shipped_eval_sets_load():
         es = load_set(name)
         assert es.today == "2026-11-16" and es.docs_dir.is_dir()
         assert all({"id", "question", "evidence", "reference"} <= set(q) for q in es.questions)
+
+
+def test_agent_prompt_versions(kb):
+    from rag.agent import AGENT_INSTRUCTIONS, AGENT_INSTRUCTIONS_V1
+    from rag.evaluate import make_system
+
+    assert AGENT_INSTRUCTIONS.startswith(AGENT_INSTRUCTIONS_V1) and "past one" in AGENT_INSTRUCTIONS
+    new = make_system("agentic", kb, ScriptedClient([]), "claude-haiku-5-5", "medium", "2026-11-16", 5)
+    old = make_system("agentic-v1", kb, ScriptedClient([]), "claude-haiku-5-5", "medium", "2026-11-16", 5)
+    assert "past one" in new.system and "past one" not in old.system

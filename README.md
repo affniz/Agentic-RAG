@@ -7,7 +7,7 @@ reads surrounding chunks for context, and answers with inline citations like `[p
 ## How it works
 
 ```
-question ─► Claude (claude-sonnet-5-5) ──tool calls──► list_documents
+question ─► Claude (claude-haiku-5-5) ──tool calls──► list_documents
                ▲                                       search_knowledge_base
                │                                         BM25 + vectors ─► RRF fusion ─► cross-encoder rerank
                └──────────── tool results ◄─────────── read_chunks (neighbouring context)
@@ -50,7 +50,7 @@ python main.py ask "How many vacation days do I get after 6 years, and how many 
 python main.py chat                        # multi-turn; /reset, /cost, /quit
 ```
 
-`ask` / `chat` take `--model` (`claude-sonnet-5-5` default, `claude-opus-5-5`, `claude-haiku-5-5`),
+`ask` / `chat` take `--model` (`claude-haiku-5-5` default, `claude-sonnet-5-5`, `claude-opus-5-5`),
 `--effort` (`low` … `max`, default `medium`) and `-q` to hide the tool trace and cost line.
 
 ## Web UI
@@ -80,6 +80,7 @@ Two eval sets ship with the repo, each a folder with `questions.jsonl`, `config.
 | Set | What it tests |
 |---|---|
 | `evals/basic` (20 questions) | Single-fact lookups over the sample Acme docs. A smoke test - everything should score ~100%. |
+| `evals/past-dates` (7 questions) | Held-out check written after the agent missed a past-date question: answers come from superseded or not-yet-amended rules. Used to verify the fix, not to tune it. |
 | `evals/hard` (40 questions) | A fictional company (Halcyon Robotics, 19 docs) built so that **one search with the question text is not enough**: multi-step lookups (person → manager → office → cost tier → hotel cap), policies that were superseded, amended or overridden by a decision log, country exceptions, lists spread across sections, false premises, unanswerable questions, and simple control questions. |
 
 ```bash
@@ -95,6 +96,23 @@ reranker, model, effort and answering rules, so the difference is the agent loop
 breaks accuracy down by question category and shows **evidence retrieved** - how much of the text
 needed to answer each question the system actually saw.
 
+### Results on `evals/hard` (measured, 40 questions)
+
+| System | Correct | Multi-step (12) | Evidence seen | API calls | Time | Cost / question |
+|---|---|---|---|---|---|---|
+| Haiku 5.5, agentic | 95% | 100% | 99% | 2.9 | 7.2s | $0.0009 |
+| Sonnet 5.5, one-shot k=5 | 70% | 33% | 84% | 1.0 | 3.3s | $0.0044 |
+| Sonnet 5.5, one-shot k=15 | 78% | 42% | 90% | 1.0 | 7.8s | $0.0070 |
+| Sonnet 5.5, agentic | 98% | 100% | 99% | 2.6 | 7.0s | $0.0138 |
+
+The agent loop is worth more than the bigger model: Haiku with the loop beats Sonnet without it
+by 25 points at a fifth of the cost. More context doesn't close the gap - the missing facts in
+multi-step questions aren't in the top 15 results for the question text either. Simple, false-premise
+and unanswerable questions score 100% for every system, so the agent costs accuracy nowhere.
+One question (`tmp-london-jan`, a past date under a superseded policy) failed for every agentic run;
+`agentic` now includes a search rule for past dates, and `agentic-v1` keeps the previous instructions
+for comparison (`--systems agentic-v1,agentic`).
+
 Answers are graded by a `claude-haiku-5-5` judge against reference answers (`--judge-model` to change),
 and results are saved to `evals/results/`. Other flags: `--category multi_hop`, `--limit N`, `--workers N`.
 
@@ -108,7 +126,7 @@ pip install -r requirements-dev.txt && pytest -q   # 18 tests, no API key needed
 
 ## Settings worth knowing
 
-- **Model** – `MODEL` in `rag/agent.py` or `--model`. Sonnet 5.5 is ~$0.02–0.05 per typical question; Opus 5.5 is 2× that, Haiku 5.5 ~1/20.
+- **Model** – `MODEL` in `rag/agent.py` or `--model`. Default `claude-haiku-5-5`: on `evals/hard` it scored 95% against Sonnet 5.5's 98% (one question apart) at about $0.001 per question against $0.014. Use Sonnet or Opus for the extra margin.
 - **Effort** – `medium` by default; `high` helps on hard multi-hop questions.
 - **Refusal fallback** – requests use `fallbacks="default"` (beta `server-side-fallback-2026-07-01`): if a safety classifier declines, the API reruns the request on a fallback model. Remove those two arguments in `rag/agent.py` to turn it off.
 - **Prompt caching** – the conversation prefix is cached automatically, so the agent's repeated calls within a question cost less once the prompt is long enough to be cached.

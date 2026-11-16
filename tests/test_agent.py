@@ -35,7 +35,7 @@ def test_parallel_tool_calls_return_in_one_message(kb):
         message(stop_reason="end_turn", usage=usage(100, 50), content=[text("5 days [vacation.md#0]")]),
     ])
     events = []
-    agent = RagAgent(kb, client=client, on_event=events.append)
+    agent = RagAgent(kb, client=client, on_event=events.append, model="claude-sonnet-5-5")
     ans = agent.ask("carry over?")
 
     assert ans.text == "5 days [vacation.md#0]" and ans.stop == "end_turn"
