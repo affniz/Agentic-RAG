@@ -7,6 +7,7 @@ import json
 import re
 import sys
 import threading
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -272,6 +273,11 @@ class KnowledgeBase:
         manifest = self._manifest()
         return manifest.get("files", {}) if manifest.get("version") == INDEX_VERSION else {}
 
+    def indexed_times(self) -> dict[str, float]:
+        """{relative path: unix time} each file was last (re-)read into the index."""
+        manifest = self._manifest()
+        return manifest.get("indexed_at", {}) if manifest.get("version") == INDEX_VERSION else {}
+
     def ingest(
         self,
         docs_dir: str | Path,
@@ -340,7 +346,11 @@ class KnowledgeBase:
 
         chunks = sorted(kept + fresh, key=lambda c: (c.source, c.index))
         _write_atomic(self._chunks_file, json.dumps([asdict(c) for c in chunks]))
-        _write_atomic(self._manifest_file, json.dumps({"version": INDEX_VERSION, "files": new_hashes}))
+        now = time.time()
+        old_times: dict[str, float] = manifest.get("indexed_at", {})
+        times = {rel: now if rel in to_read or rel not in old_times else old_times[rel] for rel in current}
+        _write_atomic(self._manifest_file,
+                      json.dumps({"version": INDEX_VERSION, "files": new_hashes, "indexed_at": times}))
         self._index = _Index.build(chunks)  # atomic swap
         reprocessed = updated + forced
         return IngestReport(added, reprocessed, removed, len(current) - len(added) - len(reprocessed), len(chunks), empty)

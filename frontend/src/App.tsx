@@ -2,7 +2,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api, streamChat } from "./api";
 import { Answer, CitationPanel, Composer, Icon, Sidebar, Steps, type CiteRef, type View } from "./components";
 import { DocumentsPage } from "./documents";
-import type { ConversationSummary, Health, Turn } from "./types";
+import { EvalsPage } from "./evals";
+import { SettingsPage, modelLabel } from "./settings";
+import type { ConversationSummary, Feedback, Health, Settings, Turn } from "./types";
 
 const SUGGESTIONS = [
   "How many vacation days can I carry over, and when do they expire?",
@@ -11,7 +13,9 @@ const SUGGESTIONS = [
   "If I put 6% of my salary in my 401(k), how much does Acme add?",
 ];
 
-const EFFORTS = ["low", "medium", "high"] as const;
+const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
+const VIEWS: View[] = ["chat", "documents", "evals", "settings"];
+const viewFromHash = (): View => VIEWS.find((v) => window.location.hash === `#/${v}`) ?? "chat";
 
 const emptyAssistant = (): Turn => ({
   role: "assistant", text: "", steps: [], citations: [], usage: null,
@@ -24,13 +28,11 @@ export default function App() {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [turns, setTurns] = useState<Turn[]>([]);
   const [busy, setBusy] = useState(false);
-  const [model, setModel] = useState<string>("");
-  const [effort, setEffort] = useState<string>("medium");
+  const [settings, setSettings] = useState<Settings | null>(null);
   const [cite, setCite] = useState<CiteRef | null>(null);
   const [navOpen, setNavOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
-  const viewFromHash = (): View => (window.location.hash === "#/documents" ? "documents" : "chat");
   const [view, setView] = useState<View>(viewFromHash);
 
   useEffect(() => {
@@ -40,7 +42,7 @@ export default function App() {
   }, []);
 
   const navigate = (v: View) => {
-    window.location.hash = v === "documents" ? "#/documents" : "#/";
+    window.location.hash = v === "chat" ? "#/" : `#/${v}`;
     setView(v);
     setNavOpen(false);
   };
@@ -50,8 +52,8 @@ export default function App() {
   const refreshHealth = useCallback(() => api.health().then(setHealth).catch(() => {}), []);
 
   useEffect(() => {
-    api.health().then((h) => { setHealth(h); setModel(h.default_model); })
-      .catch(() => setError("Can't reach the API server. Is it running on :8000?"));
+    api.health().then(setHealth).catch(() => setError("Can't reach the API server. Is it running on :8000?"));
+    api.settings().then(setSettings).catch(() => {});
     refreshList();
   }, [refreshList]);
 
@@ -65,10 +67,11 @@ export default function App() {
     setBusy(true);
     setTurns((ts) => [...ts, { ...emptyAssistant(), role: "user", text: message, streaming: false }, emptyAssistant()]);
     try {
-      for await (const ev of streamChat({ message, conversation_id: activeId, model, effort })) {
+      for await (const ev of streamChat({ message, conversation_id: activeId })) {
         switch (ev.type) {
           case "conversation":
             setActiveId(ev.id);
+            patchLast((t) => ({ ...t, id: ev.turn_id, model: ev.model }));
             refreshList();
             break;
           case "tool_call":
@@ -77,7 +80,7 @@ export default function App() {
           case "tool_result":
             patchLast((t) => ({
               ...t,
-              steps: t.steps.map((s) => (s.id === ev.id ? { ...s, status: ev.is_error ? "error" : "done", chars: ev.chars } : s)),
+              steps: t.steps.map((s) => (s.id === ev.id ? { ...s, status: ev.is_error ? "error" : "done", chars: ev.chars, results: ev.results } : s)),
             }));
             break;
           case "text_delta":
@@ -122,6 +125,25 @@ export default function App() {
     setNavOpen(false);
   }
 
+  async function resetAll() {
+    if (!window.confirm("Delete every conversation? Feedback you gave is kept.")) return;
+    await api.resetConversations();
+    newChat();
+    refreshList();
+  }
+
+  async function saveSettings(next: Settings) {
+    const saved = await api.saveSettings(next);
+    setSettings(saved);
+    return saved;
+  }
+
+  async function giveFeedback(turnId: string, rating: Feedback["rating"] | null, comment = "") {
+    if (!activeId) return;
+    const r = await api.feedback(turnId, activeId, rating, comment);
+    setTurns((ts) => ts.map((t) => (t.id === turnId ? { ...t, feedback: r.feedback } : t)));
+  }
+
   async function remove(id: string) {
     await api.deleteConversation(id);
     if (id === activeId) newChat();
@@ -136,17 +158,19 @@ export default function App() {
       <aside className={`fixed inset-y-0 left-0 z-30 w-72 border-r border-zinc-200 bg-zinc-50 transition-transform dark:border-zinc-800 dark:bg-zinc-900
         md:static md:translate-x-0 ${navOpen ? "translate-x-0" : "-translate-x-full"}`}>
         <Sidebar conversations={conversations} activeId={activeId} health={health} view={view}
-          onNavigate={navigate} onSelect={open} onNew={newChat} onDelete={remove} />
+          onNavigate={navigate} onSelect={open} onNew={newChat} onDelete={remove} onReset={resetAll} />
       </aside>
       {navOpen && <div className="fixed inset-0 z-20 bg-black/30 md:hidden" onClick={() => setNavOpen(false)} />}
 
-      {view === "documents" ? (
+      {view !== "chat" ? (
         <main className="flex min-w-0 flex-1 flex-col">
           <header className="flex items-center gap-2 border-b border-zinc-200 px-4 py-2.5 md:hidden dark:border-zinc-800">
             <button className="rounded p-1" onClick={() => setNavOpen(true)} aria-label="Open navigation">{Icon.menu("h-5 w-5")}</button>
-            <span className="text-sm font-medium">Documents</span>
+            <span className="text-sm font-medium capitalize">{view}</span>
           </header>
-          <DocumentsPage health={health} onIndexChanged={refreshHealth} />
+          {view === "documents" && <DocumentsPage health={health} onIndexChanged={refreshHealth} />}
+          {view === "evals" && <EvalsPage health={health} settings={settings} />}
+          {view === "settings" && <SettingsPage health={health} settings={settings} onSave={saveSettings} />}
         </main>
       ) : (<>
       <main className="flex min-w-0 flex-1 flex-col">
@@ -154,15 +178,21 @@ export default function App() {
           <button className="rounded p-1 md:hidden" onClick={() => setNavOpen(true)} aria-label="Open conversations">{Icon.menu("h-5 w-5")}</button>
           <h1 className="min-w-0 flex-1 truncate text-sm font-medium">{title}</h1>
           <label className="sr-only" htmlFor="model">Model</label>
-          <select id="model" value={model} onChange={(e) => setModel(e.target.value)} disabled={busy}
+          <select id="model" value={settings?.model ?? ""} disabled={busy || !settings}
+            onChange={(e) => settings && saveSettings({ ...settings, model: e.target.value })}
             className="rounded-md border border-zinc-200 bg-transparent px-2 py-1 text-xs dark:border-zinc-800">
-            {health?.models.map((m) => <option key={m} value={m}>{m.replace("claude-", "").replace(/-(\d)-(\d)$/, " $1.$2")}</option>)}
+            {health?.models.map((m) => <option key={m} value={m}>{modelLabel(m)}</option>)}
           </select>
           <label className="sr-only" htmlFor="effort">Effort</label>
-          <select id="effort" value={effort} onChange={(e) => setEffort(e.target.value)} disabled={busy}
-            className="rounded-md border border-zinc-200 bg-transparent px-2 py-1 text-xs dark:border-zinc-800">
+          <select id="effort" value={settings?.effort ?? "medium"} disabled={busy || !settings}
+            onChange={(e) => settings && saveSettings({ ...settings, effort: e.target.value as Settings["effort"] })}
+            className="hidden rounded-md border border-zinc-200 bg-transparent px-2 py-1 text-xs sm:block dark:border-zinc-800">
             {EFFORTS.map((e) => <option key={e} value={e}>{e} effort</option>)}
           </select>
+          <button onClick={() => navigate("settings")} aria-label="Settings" title="All settings"
+            className="rounded p-1 text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800 dark:hover:bg-zinc-800 dark:hover:text-zinc-200">
+            {Icon.gear()}
+          </button>
         </header>
 
         <div className="flex-1 overflow-y-auto">
@@ -194,7 +224,8 @@ export default function App() {
                   ) : (
                     <div key={i}>
                       <Steps steps={t.steps} streaming={!!t.streaming} />
-                      {t.text || !t.streaming ? <Answer turn={t} onCite={setCite} />
+                      {t.text || !t.streaming ? <Answer turn={t} onCite={setCite}
+                        onFeedback={t.id && !t.streaming ? (r, c) => giveFeedback(t.id!, r, c) : undefined} />
                         : !t.steps.length && <div className="flex items-center gap-2 text-sm text-zinc-500">{Icon.spinner()} Thinking…</div>}
                     </div>
                   ),

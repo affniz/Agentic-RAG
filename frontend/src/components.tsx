@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { api } from "./api";
-import type { ChunkView, Citation, ConversationSummary, Health, Step, Turn } from "./types";
+import type { ChunkView, Citation, ConversationSummary, Feedback, Health, Step, Turn } from "./types";
 
 // ---------------------------------------------------------------- icons
 
@@ -25,6 +25,10 @@ export const Icon = {
   refresh: (c?: string) => svg(<path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7" />, c),
   chat: (c?: string) => svg(<path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z" />, c),
   folder: (c?: string) => svg(<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />, c),
+  thumbUp: (c?: string) => svg(<path d="M7 10v11H4a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1zm0 0 4-7a2.5 2.5 0 0 1 3 3l-1 4h6a2 2 0 0 1 2 2.3l-1.4 7A2 2 0 0 1 17.6 21H7" />, c),
+  thumbDown: (c?: string) => svg(<path d="M17 14V3h3a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1zm0 0-4 7a2.5 2.5 0 0 1-3-3l1-4H5a2 2 0 0 1-2-2.3l1.4-7A2 2 0 0 1 6.4 3H17" />, c),
+  chart: (c?: string) => svg(<path d="M4 4v16h16M8 15l4-4 3 3 5-6" />, c),
+  gear: (c?: string) => svg(<><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" /></>, c),
   scan: (c?: string) => svg(<path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3M7 12h10" />, c),
   trash: (c?: string) => svg(<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3" />, c),
   spinner: (c = "h-4 w-4") => (
@@ -45,7 +49,11 @@ function ago(ts: number): string {
   return `${Math.floor(s / 86400)}d ago`;
 }
 
-export type View = "chat" | "documents";
+export type View = "chat" | "documents" | "evals" | "settings";
+
+const NAV: [View, string, (c?: string) => ReactNode][] = [
+  ["chat", "Chat", Icon.chat], ["documents", "Documents", Icon.folder], ["evals", "Evals", Icon.chart], ["settings", "Settings", Icon.gear],
+];
 
 export function Sidebar(props: {
   conversations: ConversationSummary[];
@@ -56,6 +64,7 @@ export function Sidebar(props: {
   onSelect: (id: string) => void;
   onNew: () => void;
   onDelete: (id: string) => void;
+  onReset: () => void;
 }) {
   const { conversations, activeId, health } = props;
   return (
@@ -65,18 +74,22 @@ export function Sidebar(props: {
         <span className="font-semibold tracking-tight">Agentic RAG</span>
       </div>
       <nav className="space-y-0.5 px-2 pb-3" aria-label="Sections">
-        {([["chat", "Chat", Icon.chat()], ["documents", "Documents", Icon.folder()]] as const).map(([id, label, icon]) => (
+        {NAV.map(([id, label, icon]) => (
           <button key={id} onClick={() => props.onNavigate(id)} aria-current={props.view === id ? "page" : undefined}
             className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium ${props.view === id
               ? "bg-zinc-200/70 dark:bg-zinc-800" : "text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-900"}`}>
-            {icon} {label}
+            {icon()} {label}
           </button>
         ))}
       </nav>
-      <div className="px-3">
+      <div className="flex gap-2 px-3">
         <button onClick={props.onNew}
-          className="flex w-full items-center gap-2 rounded-lg border border-zinc-200 px-3 py-2 text-sm font-medium hover:bg-zinc-100 dark:border-zinc-800 dark:hover:bg-zinc-900">
+          className="flex flex-1 items-center gap-2 rounded-lg border border-zinc-200 px-3 py-2 text-sm font-medium hover:bg-zinc-100 dark:border-zinc-800 dark:hover:bg-zinc-900">
           {Icon.plus()} New chat
+        </button>
+        <button onClick={props.onReset} disabled={conversations.length === 0} title="Delete every conversation"
+          className="rounded-lg border border-zinc-200 px-3 py-2 text-sm text-zinc-600 hover:bg-zinc-100 disabled:opacity-40 dark:border-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-900">
+          Reset
         </button>
       </div>
       <nav className="mt-3 flex-1 overflow-y-auto px-2" aria-label="Conversations">
@@ -116,10 +129,15 @@ export function Sidebar(props: {
 
 // ---------------------------------------------------------------- steps
 
+function resultCount(s: Step): ReactNode {
+  if (s.status !== "done" || s.results == null) return null;
+  return <span className="text-zinc-400"> → {s.results} result{s.results === 1 ? "" : "s"}</span>;
+}
+
 function stepLabel(s: Step): { icon: ReactNode; text: ReactNode } {
   const a = s.args as Record<string, string | number | null>;
   if (s.name === "search_knowledge_base")
-    return { icon: Icon.search(), text: <>Searched <q className="font-medium text-zinc-700 dark:text-zinc-200">{a.query}</q>{a.source ? <> in {a.source}</> : null}</> };
+    return { icon: Icon.search(), text: <>Searched <q className="font-medium text-zinc-700 dark:text-zinc-200">{a.query}</q>{a.source ? <> in {a.source}</> : null}{resultCount(s)}</> };
   if (s.name === "read_chunks")
     return { icon: Icon.doc(), text: <>Read <span className="font-medium text-zinc-700 dark:text-zinc-200">{a.source}</span> #{a.start}{a.end !== a.start ? `–${a.end}` : ""}</> };
   if (s.name === "list_documents") return { icon: Icon.list(), text: "Listed documents" };
@@ -180,7 +198,11 @@ export function citationOrder(text: string): CiteRef[] {
   return out;
 }
 
-export function Answer({ turn, onCite }: { turn: Turn; onCite: (c: CiteRef) => void }) {
+export function Answer({ turn, onCite, onFeedback }: {
+  turn: Turn;
+  onCite: (c: CiteRef) => void;
+  onFeedback?: (rating: Feedback["rating"] | null, comment?: string) => Promise<void>;
+}) {
   const order = useMemo(() => citationOrder(turn.text), [turn.text]);
   const md = useMemo(
     () => turn.text.replace(CITE, (_, s: string, i: string) => `[${s}#${i}](cite:${encodeURIComponent(s)}:${i})`),
@@ -235,16 +257,91 @@ export function Answer({ turn, onCite }: { turn: Turn; onCite: (c: CiteRef) => v
         </div>
       )}
 
-      {!turn.streaming && turn.usage && (
-        <div className="mt-2 text-xs text-zinc-400">
-          {turn.usage.api_calls} API call{turn.usage.api_calls === 1 ? "" : "s"} ·{" "}
-          {(turn.usage.input_tokens + turn.usage.cache_read_tokens + turn.usage.cache_write_tokens).toLocaleString()} in /{" "}
-          {turn.usage.output_tokens.toLocaleString()} out
-          {turn.cost_usd != null && <> · ~${turn.cost_usd.toFixed(4)}</>}
-          {turn.seconds != null && <> · {turn.seconds.toFixed(1)}s</>}
+      {!turn.streaming && (turn.usage || onFeedback) && (
+        <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1">
+          {turn.usage && (
+            <div className="text-xs text-zinc-400" title={`${(turn.usage.input_tokens + turn.usage.cache_read_tokens + turn.usage.cache_write_tokens).toLocaleString()} input / ${turn.usage.output_tokens.toLocaleString()} output tokens${turn.model ? ` · ${turn.model}` : ""}`}>
+              {turn.cost_usd != null && <>~${turn.cost_usd.toFixed(4)} · </>}
+              {turn.usage.api_calls} API call{turn.usage.api_calls === 1 ? "" : "s"}
+              {turn.seconds != null && <> · {turn.seconds.toFixed(1)}s</>}
+            </div>
+          )}
+          {onFeedback && turn.stop !== "error" && <FeedbackButtons feedback={turn.feedback ?? null} onChange={onFeedback} />}
         </div>
       )}
     </div>
+  );
+}
+
+function FeedbackButtons({ feedback, onChange }: {
+  feedback: Feedback | null;
+  onChange: (rating: Feedback["rating"] | null, comment?: string) => Promise<void>;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [comment, setComment] = useState(feedback?.comment ?? "");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function save(rating: Feedback["rating"] | null, text = "") {
+    setSaving(true);
+    setError(null);
+    try {
+      await onChange(rating, text);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const click = (rating: Feedback["rating"]) => {
+    if (feedback?.rating === rating) {
+      setEditing(false);
+      return save(null); // clicking the active thumb again removes the feedback
+    }
+    setComment("");
+    setEditing(rating === "down");
+    return save(rating);
+  };
+
+  const thumb = (rating: Feedback["rating"], icon: ReactNode, label: string) => (
+    <button onClick={() => click(rating)} disabled={saving} aria-pressed={feedback?.rating === rating} aria-label={label} title={label}
+      className={`rounded p-1 disabled:opacity-50 ${feedback?.rating === rating
+        ? "bg-indigo-100 text-indigo-700 dark:bg-indigo-900/50 dark:text-indigo-300"
+        : "text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"}`}>
+      {icon}
+    </button>
+  );
+
+  return (
+    <>
+      <div className="flex items-center gap-0.5">
+        {thumb("up", Icon.thumbUp("h-3.5 w-3.5"), "Good answer")}
+        {thumb("down", Icon.thumbDown("h-3.5 w-3.5"), "Bad answer")}
+        {feedback?.rating === "down" && !editing && (
+          <button onClick={() => { setComment(feedback.comment); setEditing(true); }}
+            className="ml-1 text-xs text-zinc-400 underline-offset-2 hover:text-zinc-700 hover:underline dark:hover:text-zinc-200">
+            {feedback.comment ? "Edit correction" : "Add correction"}
+          </button>
+        )}
+        {error && <span className="ml-1 text-xs text-red-600">{error}</span>}
+      </div>
+      {editing && (
+        <form className="w-full" onSubmit={async (e) => { e.preventDefault(); await save("down", comment.trim()); setEditing(false); }}>
+          <label className="mb-1 block text-xs text-zinc-500" htmlFor="fb-comment">
+            What should the answer have been? Optional, but a 👎 needs this to become an eval question.
+          </label>
+          <textarea id="fb-comment" rows={2} value={comment} onChange={(e) => setComment(e.target.value)} autoFocus
+            className="w-full rounded-lg border border-zinc-200 bg-transparent px-2.5 py-1.5 text-sm outline-none focus:border-indigo-400 dark:border-zinc-800" />
+          <div className="mt-1 flex gap-2">
+            <button type="submit" disabled={saving}
+              className="rounded-md bg-indigo-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-indigo-700 disabled:opacity-50">Save</button>
+            <button type="button" onClick={() => setEditing(false)}
+              className="rounded-md px-2.5 py-1 text-xs text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800">Skip</button>
+          </div>
+        </form>
+      )}
+    </>
   );
 }
 

@@ -114,9 +114,19 @@ TOOLS: list[dict[str, Any]] = [
 ]
 
 
-def build_handlers(kb: KnowledgeBase, seen: list[str] | None = None) -> dict[str, Callable[..., str]]:
+@dataclass
+class SearchOptions:
+    """Overrides for the search tool, set from the UI. None = leave the choice to the model / the KB default."""
+
+    k: int | None = None  # results per search; replaces the k the model asks for
+    rerank: bool | None = None
+
+
+def build_handlers(kb: KnowledgeBase, seen: list[str] | None = None,
+                   options: SearchOptions | None = None) -> dict[str, Callable[..., str]]:
     """Tool implementations. Every chunk returned to the model is recorded in `seen` as 'source#index'."""
     seen = seen if seen is not None else []
+    options = options or SearchOptions()
 
     def note(chunks: Any) -> None:
         seen.extend(f"{c.source}#{c.index}" for c in chunks)
@@ -128,7 +138,8 @@ def build_handlers(kb: KnowledgeBase, seen: list[str] | None = None) -> dict[str
         return "\n".join(f"{name} ({n} chunks)" for name, n in sorted(src.items()))
 
     def search_knowledge_base(query: str, k: int = 5, source: str | None = None) -> str:
-        hits = kb.search(query, k=max(1, min(int(k), 10)), source=source or None)
+        k = options.k if options.k is not None else k
+        hits = kb.search(query, k=max(1, min(int(k), 10)), source=source or None, rerank=options.rerank)
         if not hits:
             return "No results."
         note(c for c, _ in hits)
@@ -194,7 +205,7 @@ class RagAgent:
     """Runs the tool loop. Pass `on_event` to observe progress (used by the CLI and the future UI).
 
     Events: {"type": "text_delta", "text"}, {"type": "tool_call", "id", "name", "args"},
-            {"type": "tool_result", "id", "name", "is_error", "chars"},
+            {"type": "tool_result", "id", "name", "is_error", "chars", "results"},
             {"type": "answer", "text", "stop", "citations"}, {"type": "usage", "usage", "cost_usd"}
     """
 
@@ -208,11 +219,13 @@ class RagAgent:
         client: Any = None,
         today: str | None = None,
         instructions: str = AGENT_INSTRUCTIONS,
+        search: SearchOptions | None = None,
     ):
         self.client = client or anthropic.Anthropic()
         self.kb = kb
         self._seen: list[str] = []
-        self.handlers = build_handlers(kb, self._seen)
+        self.search = search or SearchOptions()  # mutable: changes apply to the next search
+        self.handlers = build_handlers(kb, self._seen, self.search)
         self.system = system_prompt(instructions, today or datetime.date.today().isoformat())
         self.model = model
         self.effort = effort
@@ -292,9 +305,10 @@ class RagAgent:
                 args = block.input if isinstance(block.input, dict) else json.loads(block.input)
                 calls.append({"name": block.name, "args": args})
                 self.on_event({"type": "tool_call", "id": block.id, "name": block.name, "args": args})
+                seen_before = len(self._seen)
                 output, is_error = self._run_tool(block.name, args)
                 self.on_event({"type": "tool_result", "id": block.id, "name": block.name, "is_error": is_error,
-                               "chars": len(output)})
+                               "chars": len(output), "results": len(self._seen) - seen_before})
                 results.append(
                     {"type": "tool_result", "tool_use_id": block.id, "content": output, "is_error": is_error}
                 )

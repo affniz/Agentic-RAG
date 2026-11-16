@@ -70,10 +70,29 @@ class DemoClient:
     def __init__(self, delay: float = 0.03):
         self.delay = delay
         self.beta = NS(messages=NS(stream=self._stream))
+        self.messages = NS(parse=self._parse)  # the eval judge
+
+    def _parse(self, **kw: Any) -> NS:
+        """Demo judge: grades by how many of the reference's key terms appear in the answer."""
+        from .evaluate import Verdict
+
+        prompt = kw["messages"][0]["content"]
+        ref = re.search(r"Reference answer: (.*)", prompt)
+        ans = re.search(r"<answer>\n(.*)\n</answer>", prompt, flags=re.S)
+        terms = {t.lower() for t in re.findall(r"[A-Za-z0-9$%.]{4,}", ref.group(1) if ref else "")}
+        text = (ans.group(1) if ans else "").lower()
+        share = sum(t in text for t in terms) / len(terms) if terms else 0.0
+        verdict = "correct" if share >= 0.6 else "partially_correct" if share >= 0.3 else "incorrect"
+        reasoning = f"Demo judge (no model call): {share:.0%} of the reference's key terms appear in the answer."
+        return NS(parsed_output=Verdict(reasoning=reasoning, verdict=verdict), stop_reason="end_turn",
+                  usage=_usage(0, 0))
 
     def _stream(self, **kw: Any) -> _Stream:
         last = kw["messages"][-1]
-        if isinstance(last["content"], str):  # a new question -> search for it
+        if "tools" not in kw:  # one-shot baseline: the retrieved excerpts are in the prompt
+            ctx = re.search(r"<context>\n(.*)\n</context>", last["content"], flags=re.S)
+            msg = message("end_turn", [text_block(_compose(ctx.group(1) if ctx else ""))], _usage(0, 0))
+        elif isinstance(last["content"], str):  # a new question -> search for it
             msg = message("tool_use", [tool_block(f"demo_{time.time_ns()}", "search_knowledge_base",
                                                   query=last["content"], k=3, source=None)], _usage(0, 0))
         else:  # tool results -> answer from them

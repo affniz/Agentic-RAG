@@ -326,7 +326,7 @@ function FileTable({ docs, onView, onDelete, onTranscribe, busy, compact = false
             <th className="px-3 py-2 font-medium">Status</th>
             <th className="hidden px-3 py-2 text-right font-medium sm:table-cell">Chunks</th>
             <th className={`${wide} px-3 py-2 text-right font-medium`}>Size</th>
-            <th className={`${widest} px-3 py-2 font-medium`}>Modified</th>
+            <th className={`${widest} px-3 py-2 font-medium`}>Last indexed</th>
             <th className="px-3 py-2"><span className="sr-only">Actions</span></th>
           </tr>
         </thead>
@@ -350,7 +350,8 @@ function FileTable({ docs, onView, onDelete, onTranscribe, busy, compact = false
                 </td>
                 <td className="hidden px-3 py-2.5 text-right tabular-nums text-zinc-600 dark:text-zinc-400 sm:table-cell">{d.chunks || "-"}</td>
                 <td className={`${wide} whitespace-nowrap px-3 py-2.5 text-right tabular-nums text-zinc-600 dark:text-zinc-400`}>{size(d.size)}</td>
-                <td className={`${widest} whitespace-nowrap px-3 py-2.5 text-zinc-600 dark:text-zinc-400`}>{when(d.modified)}</td>
+                <td className={`${widest} whitespace-nowrap px-3 py-2.5 text-zinc-600 dark:text-zinc-400`}
+                  title={d.modified != null ? `File modified ${when(d.modified)}` : undefined}>{d.indexed_at != null ? when(d.indexed_at) : "Never"}</td>
                 <td className="whitespace-nowrap px-3 py-2.5 text-right">
                   {d.status === "empty" && d.type === "pdf" && confirming !== d.name && (
                     <button onClick={() => onTranscribe(d)} disabled={busy}

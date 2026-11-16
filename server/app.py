@@ -3,10 +3,11 @@
     python -m uvicorn server.app:app --reload          # API on :8000 (serves frontend/dist if built)
     RAG_FAKE_LLM=1 python -m uvicorn server.app:app    # demo mode: no API key, no cost
     Settings: RAG_DOCS (documents folder, default ./docs), RAG_INDEX, RAG_RERANK=0,
-              RAG_OCR=1 (transcribe scanned PDFs with Claude automatically)
+              RAG_OCR=1 (transcribe scanned PDFs with Claude automatically),
+              RAG_DATA (settings + feedback, default ./.rag_data), RAG_EVALS (eval sets, default ./evals)
 
-Chat responses stream as Server-Sent Events. Conversations live in memory for now
-(phase 1); they are lost when the server restarts.
+Chat responses stream as Server-Sent Events. Conversations live in memory for now; they are
+lost when the server restarts. Settings and 👍/👎 feedback are saved in RAG_DATA.
 """
 
 from __future__ import annotations
@@ -28,7 +29,9 @@ from pydantic import BaseModel, Field
 
 from rag.agent import MODEL, PRICES, RagAgent, Usage
 from rag.store import KnowledgeBase
+from server import evals
 from server.documents import make_router
+from server.feedback import FeedbackStore, Settings, SettingsStore, export_eval_set
 
 ROOT = Path(__file__).resolve().parents[1]
 INDEX_DIR = os.environ.get("RAG_INDEX", str(ROOT / ".rag_index"))
@@ -37,6 +40,8 @@ RERANK = os.environ.get("RAG_RERANK", "1") == "1"
 OCR = os.environ.get("RAG_OCR") == "1"  # transcribe scanned PDFs with Claude (sends them to the API)
 DIST = ROOT / "frontend" / "dist"
 DOCS_DIR = Path(os.environ.get("RAG_DOCS", str(ROOT / "docs")))
+DATA_DIR = Path(os.environ.get("RAG_DATA", str(ROOT / ".rag_data")))
+EVALS_DIR = Path(os.environ.get("RAG_EVALS", str(ROOT / "evals")))
 
 app = FastAPI(title="Agentic RAG")
 def _make_ocr() -> Any:
@@ -73,6 +78,10 @@ def _make_client() -> Any:
 
 
 client = _make_client()
+settings_store = SettingsStore(DATA_DIR / "settings.json", Settings(model=MODEL, rerank=RERANK))
+feedback_store = FeedbackStore(DATA_DIR / "feedback.json")
+app.include_router(evals.make_router(EVALS_DIR, DATA_DIR / "eval_index", lambda: client,
+                                     settings_store.get, FAKE_LLM))
 
 
 # ---------------------------------------------------------------- conversations
@@ -82,12 +91,15 @@ client = _make_client()
 class Turn:
     role: Literal["user", "assistant"]
     text: str
+    id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     steps: list[dict[str, Any]] = field(default_factory=list)
     citations: list[dict[str, Any]] = field(default_factory=list)
     usage: dict[str, Any] | None = None
     cost_usd: float | None = None
     seconds: float | None = None
     stop: str | None = None
+    model: str | None = None
+    feedback: dict[str, Any] | None = None  # {"rating": "up" | "down", "comment": str}
 
 
 @dataclass
@@ -123,8 +135,26 @@ def _get(cid: str) -> Conversation:
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=20_000)
     conversation_id: str | None = None
-    model: str | None = None
-    effort: Literal["low", "medium", "high", "xhigh", "max"] = "medium"
+    model: str | None = None  # default: the saved settings
+    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
+
+
+class FeedbackRequest(BaseModel):
+    conversation_id: str
+    rating: Literal["up", "down"] | None  # None removes the feedback
+    comment: str = Field("", max_length=5000)
+
+
+@app.get("/api/settings")
+def get_settings() -> Settings:
+    return settings_store.get()
+
+
+@app.put("/api/settings")
+def put_settings(s: Settings) -> Settings:
+    if s.model not in PRICES:
+        raise HTTPException(400, f"unknown model {s.model}")
+    return settings_store.put(s)
 
 
 @app.get("/api/health")
@@ -137,6 +167,7 @@ def health() -> dict[str, Any]:
         "demo_mode": FAKE_LLM,
         "reranker": bool(kb.reranker and kb.reranker.available),
         "ocr": kb.pdf_ocr is not None,
+        "reranker_configured": kb.reranker is not None,
     }
 
 
@@ -158,6 +189,50 @@ def delete_conversation(cid: str) -> dict[str, bool]:
     return {"ok": True}
 
 
+@app.delete("/api/conversations")
+def reset_conversations() -> dict[str, int]:
+    """Clear every conversation (feedback already given is kept)."""
+    busy = [c for c in conversations.values() if c.lock.locked()]
+    for cid in [cid for cid, c in conversations.items() if c not in busy]:
+        del conversations[cid]
+    return {"kept_busy": len(busy)}
+
+
+@app.put("/api/feedback/{turn_id}")
+def put_feedback(turn_id: str, req: FeedbackRequest) -> dict[str, Any]:
+    conv = _get(req.conversation_id)
+    pos = next((i for i, t in enumerate(conv.turns) if t.id == turn_id and t.role == "assistant"), None)
+    if pos is None:
+        raise HTTPException(404, "answer not found")
+    turn = conv.turns[pos]
+    question = next((t for t in reversed(conv.turns[:pos]) if t.role == "user"), None)
+    if req.rating is None:
+        turn.feedback = None
+        feedback_store.set(turn_id, None)
+        return {"feedback": None}
+    turn.feedback = {"rating": req.rating, "comment": req.comment}
+    feedback_store.set(turn_id, {
+        "turn_id": turn_id, "conversation_id": conv.id, "rating": req.rating, "comment": req.comment,
+        "question": question.text if question else "", "answer": turn.text, "citations": turn.citations,
+        "model": turn.model, "followup": pos > 1, "cost_usd": turn.cost_usd,
+    })
+    return {"feedback": turn.feedback}
+
+
+@app.get("/api/feedback")
+def list_feedback() -> list[dict[str, Any]]:
+    return feedback_store.all()
+
+
+@app.post("/api/feedback/export")
+def export_feedback() -> dict[str, Any]:
+    """Write all feedback as the eval set evals/feedback (replacing the previous export)."""
+    records = feedback_store.all()
+    if not records:
+        raise HTTPException(400, "no feedback to export yet")
+    return export_eval_set(records, EVALS_DIR / "feedback", DOCS_DIR)
+
+
 @app.get("/api/chunks/{source:path}/{index}")
 def get_chunk(source: str, index: int, context: int = 1) -> dict[str, Any]:
     """A cited chunk plus `context` neighbours on each side, for the citation panel."""
@@ -175,21 +250,24 @@ def get_chunk(source: str, index: int, context: int = 1) -> dict[str, Any]:
 
 @app.post("/api/chat")
 async def chat(req: ChatRequest) -> StreamingResponse:
-    model = req.model or MODEL
-    if req.model and req.model not in PRICES:
-        raise HTTPException(400, f"unknown model {req.model}")
+    settings = settings_store.get()
+    model, effort = req.model or settings.model, req.effort or settings.effort
+    if model not in PRICES:
+        raise HTTPException(400, f"unknown model {model}")
 
     if req.conversation_id:
         conv = _get(req.conversation_id)
     else:
         cid = uuid.uuid4().hex[:12]
-        conv = Conversation(cid, RagAgent(kb, model=model, effort=req.effort, client=client))
+        conv = Conversation(cid, RagAgent(kb, model=model, effort=effort, client=client))
         conv.title = req.message.strip().splitlines()[0][:60]
         conversations[cid] = conv
     if not conv.lock.acquire(blocking=False):
         raise HTTPException(409, "this conversation is already answering a question")
 
-    conv.agent.model, conv.agent.effort = model, req.effort
+    # Settings apply from the next question on, also in existing conversations.
+    conv.agent.model, conv.agent.effort, conv.agent.max_steps = model, effort, settings.max_steps
+    conv.agent.search.k, conv.agent.search.rerank = settings.search_k, settings.rerank
     conv.turns.append(Turn("user", req.message))
     return StreamingResponse(_run(conv, req.message), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
@@ -199,7 +277,7 @@ async def _run(conv: Conversation, question: str) -> AsyncIterator[str]:
     """Run the (blocking) agent in a worker thread and relay its events as SSE."""
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
-    turn = Turn("assistant", "")
+    turn = Turn("assistant", "", model=conv.agent.model)
     steps: dict[str, dict[str, Any]] = {}
 
     def emit(event: dict[str, Any]) -> None:
@@ -211,7 +289,8 @@ async def _run(conv: Conversation, question: str) -> AsyncIterator[str]:
             steps[event["id"]] = step
             turn.steps.append(step)
         elif event["type"] == "tool_result":
-            steps[event["id"]].update(status="error" if event["is_error"] else "done", chars=event["chars"])
+            steps[event["id"]].update(status="error" if event["is_error"] else "done", chars=event["chars"],
+                                      results=event.get("results"))
         elif event["type"] == "usage":
             event = {**event, "usage": asdict(event["usage"]) if isinstance(event["usage"], Usage) else event["usage"]}
         emit(event)
@@ -236,7 +315,7 @@ async def _run(conv: Conversation, question: str) -> AsyncIterator[str]:
             conv.lock.release()
             emit(None)
 
-    yield _sse({"type": "conversation", **conv.summary()})
+    yield _sse({"type": "conversation", **conv.summary(), "turn_id": turn.id})
     worker = loop.run_in_executor(None, work)
     while (event := await queue.get()) is not None:
         yield _sse(event)

@@ -19,7 +19,7 @@ from typing import Any, Callable, Literal
 import anthropic
 from pydantic import BaseModel
 
-from .agent import AGENT_INSTRUCTIONS_V1, Answer, RagAgent, Usage
+from .agent import AGENT_INSTRUCTIONS_V1, Answer, RagAgent, SearchOptions, Usage
 from .baseline import NaiveRag
 from .store import KnowledgeBase
 
@@ -52,9 +52,9 @@ def load_set(path: str | Path) -> EvalSet:
     )
 
 
-def set_knowledge_base(evalset: EvalSet, rerank: bool = True) -> KnowledgeBase:
+def set_knowledge_base(evalset: EvalSet, rerank: bool = True, index_dir: str | Path | None = None) -> KnowledgeBase:
     """Each eval set gets its own index, kept in sync with its documents."""
-    kb = KnowledgeBase(f".rag_index_eval_{evalset.name}", rerank=rerank)
+    kb = KnowledgeBase(index_dir or f".rag_index_eval_{evalset.name}", rerank=rerank)
     kb.ingest(evalset.docs_dir)
     return kb
 
@@ -107,6 +107,18 @@ def retrieval_eval(kb: KnowledgeBase, questions: list[dict[str, Any]], k: int = 
     return results
 
 
+def save_retrieval_run(set_name: str, k: int, results: dict[str, Any], questions: int,
+                       out_dir: str | Path = "evals/results") -> Path:
+    """Keep retrieval metrics too, so the dashboard can chart them over time."""
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    path = out / f"{time.strftime('%Y%m%d-%H%M%S')}-{set_name}-retrieval.json"
+    summary = {"kind": "retrieval", "set": set_name, "created_at": time.time(), "k": k,
+               "questions": questions, "configs": results}
+    path.write_text(json.dumps({"summary": summary, "rows": []}, indent=2))
+    return path
+
+
 # ---------------------------------------------------------------- answers
 
 
@@ -152,11 +164,14 @@ def judge(client: Any, q: dict[str, Any], answer: str, model: str = JUDGE_MODEL)
 
 
 def make_system(name: str, kb: KnowledgeBase, client: Any, model: str, effort: str, today: str | None,
-                naive_k: int) -> Any:
+                naive_k: int, max_steps: int = 12, search_k: int | None = None) -> Any:
+    """search_k / max_steps: the agent's settings (results per search, step limit); naive uses naive_k."""
+    agent = dict(model=model, effort=effort, client=client, today=today, max_steps=max_steps,
+                 search=SearchOptions(k=search_k))
     if name == "agentic":
-        return RagAgent(kb, model=model, effort=effort, client=client, today=today)
+        return RagAgent(kb, **agent)
     if name == "agentic-v1":  # previous agent instructions, kept for A/B comparison
-        return RagAgent(kb, model=model, effort=effort, client=client, today=today, instructions=AGENT_INSTRUCTIONS_V1)
+        return RagAgent(kb, **agent, instructions=AGENT_INSTRUCTIONS_V1)
     if name == "naive":
         return NaiveRag(kb, model=model, effort=effort, k=naive_k, client=client, today=today)
     raise ValueError(f"unknown system {name!r}; choose from {SYSTEMS}")
@@ -177,6 +192,11 @@ def answer_eval(
     log: Callable[[str], None] = print,
     client: Any = None,
     repeats: int = 1,
+    max_steps: int = 12,
+    search_k: int | None = None,
+    set_name: str | None = None,
+    on_row: Callable[[int, int, dict[str, Any]], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """Answer and grade every question with every system, `repeats` times.
 
@@ -189,7 +209,9 @@ def answer_eval(
 
     def run(job: tuple[dict[str, Any], str, int]) -> dict[str, Any]:
         q, sysname, rep = job
-        system = make_system(sysname, kb, client, model, effort, today, naive_k)  # fresh, no history
+        if should_stop and should_stop():
+            raise EvalCancelled()
+        system = make_system(sysname, kb, client, model, effort, today, naive_k, max_steps, search_k)  # fresh
         start = time.time()
         ans: Answer = system.ask(q["question"])
         elapsed = time.time() - start
@@ -225,9 +247,13 @@ def answer_eval(
             run_tag = f" run {row['run']}" if repeats > 1 else ""
             log(f"[{i}/{len(jobs)}]{run_tag} {row['system']:<10} {row['id']:<26} {row['verdict']:<17}"
                 f"tools={row['tool_calls']}{ev}  ${row['cost_usd']:.4f}  {row['seconds']}s")
+            if on_row:
+                on_row(i, len(jobs), row)
 
-    summary = {"model": model, "effort": effort, "questions": len(questions), "naive_k": naive_k,
-               "judge_model": judge_model, "repeats": repeats,
+    summary = {"kind": "answers", "set": set_name or label or None, "created_at": time.time(),
+               "model": model, "effort": effort, "questions": len(questions), "naive_k": naive_k,
+               "judge_model": judge_model, "repeats": repeats, "max_steps": max_steps, "search_k": search_k,
+               "rerank": kb.reranker is not None,
                "systems": {s: combine_runs([r for r in rows if r["system"] == s], repeats) for s in systems}}
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -237,6 +263,10 @@ def answer_eval(
     path.write_text(json.dumps({"summary": summary, "rows": rows}, indent=2, ensure_ascii=False))
     summary["results_file"] = str(path)
     return summary
+
+
+class EvalCancelled(Exception):
+    """Raised by answer_eval when should_stop() turns true; nothing is saved."""
 
 
 RANGED = ("correct", "partially_correct", "evidence_recall", "cited_expected_sources")
