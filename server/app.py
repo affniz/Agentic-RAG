@@ -1,7 +1,7 @@
 """FastAPI backend for the web UI.
 
-    uvicorn server.app:app --reload            # API on :8000 (serves frontend/dist if built)
-    RAG_FAKE_LLM=1 uvicorn server.app:app      # demo mode: no API key, no cost
+    python -m uvicorn server.app:app --reload          # API on :8000 (serves frontend/dist if built)
+    RAG_FAKE_LLM=1 python -m uvicorn server.app:app    # demo mode: no API key, no cost
 
 Chat responses stream as Server-Sent Events. Conversations live in memory for now
 (phase 1); they are lost when the server restarts.

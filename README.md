@@ -62,12 +62,12 @@ conversation list. Works on mobile and in dark mode.
 
 ```bash
 cd frontend && npm install && npm run build && cd ..   # once, and after frontend changes
-uvicorn server.app:app --port 8000                     # then open http://localhost:8000
+python -m uvicorn server.app:app --port 8000           # then open http://localhost:8000
 ```
 
-- **Demo mode:** `RAG_FAKE_LLM=1 uvicorn server.app:app` runs the whole UI with real search but a
+- **Demo mode:** `RAG_FAKE_LLM=1 python -m uvicorn server.app:app` runs the whole UI with real search but a
   fake model: no API key, no cost. Handy for UI work.
-- **Frontend dev with hot reload:** run uvicorn as above, then `cd frontend && npm run dev` and open
+- **Frontend dev with hot reload:** run the server as above, then `cd frontend && npm run dev` and open
   http://localhost:5173 (API calls are proxied to :8000).
 - Other settings: `RAG_INDEX` (index directory), `RAG_RERANK=0` (turn off the reranker).
 - Conversations are kept in memory for now and are lost when the server restarts.
