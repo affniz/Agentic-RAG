@@ -132,7 +132,7 @@ def build_handlers(kb: KnowledgeBase, seen: list[str] | None = None) -> dict[str
         if not hits:
             return "No results."
         note(c for c, _ in hits)
-        return "\n\n".join(f"{c.label()}\n{c.text}" for c, _ in hits)
+        return "\n\n".join(c.render() for c, _ in hits)
 
     def read_chunks(source: str, start: int, end: int) -> str:
         end = min(end, start + 7)
@@ -140,7 +140,7 @@ def build_handlers(kb: KnowledgeBase, seen: list[str] | None = None) -> dict[str
         if not chunks:
             return f"No chunks {start}-{end} found for '{source}'."
         note(chunks)
-        return "\n\n".join(f"{c.label()}\n{c.text}" for c in chunks)
+        return "\n\n".join(c.render() for c in chunks)
 
     return {
         "list_documents": list_documents,

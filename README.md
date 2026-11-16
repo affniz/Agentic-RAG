@@ -109,9 +109,13 @@ The agent loop is worth more than the bigger model: Haiku with the loop beats So
 by 25 points at a fifth of the cost. More context doesn't close the gap - the missing facts in
 multi-step questions aren't in the top 15 results for the question text either. Simple, false-premise
 and unanswerable questions score 100% for every system, so the agent costs accuracy nowhere.
-One question (`tmp-london-jan`, a past date under a superseded policy) failed for every agentic run;
-`agentic` now includes a search rule for past dates, and `agentic-v1` keeps the previous instructions
-for comparison (`--systems agentic-v1,agentic`).
+One question (`tmp-london-jan`, a past date under a superseded policy) failed for every agentic run.
+The cause was chunking, not the model: the agent retrieved each policy's hotel table, but the
+sentence saying when each policy applied sat in a different chunk, so it saw two undated tables and
+picked the newer one. Every chunk now carries its document's intro (status, effective dates, scope) -
+see `Chunk.render()`. A search rule for past dates was also tried first (`agentic`, versus
+`agentic-v1` without it): it improved evidence retrieval (83% → 95% on `evals/past-dates`) and
+citations, but not accuracy (86% for both).
 
 Answers are graded by a `claude-haiku-5-5` judge against reference answers (`--judge-model` to change),
 and results are saved to `evals/results/`. Other flags: `--category multi_hop`, `--limit N`, `--workers N`.

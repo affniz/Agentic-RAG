@@ -16,7 +16,7 @@ from rank_bm25 import BM25Plus
 
 SUPPORTED = {".md", ".txt", ".pdf"}
 COLLECTION = "docs"
-INDEX_VERSION = 2  # bump when the chunk format changes; forces a full rebuild
+INDEX_VERSION = 3  # bump when the chunk format changes; forces a full rebuild
 RERANK_MODEL = "Xenova/ms-marco-MiniLM-L-6-v2"
 SEARCH_MODES = ("hybrid", "bm25", "vector")
 
@@ -28,6 +28,7 @@ class Chunk:
     index: int  # position of the chunk within its document
     text: str
     section: str = ""  # heading path for Markdown, e.g. "Vacation Policy > Carry-over"
+    doc_note: str = ""  # the document's intro (status, effective dates, scope), shown with every chunk
 
     @property
     def indexed_text(self) -> str:
@@ -36,6 +37,11 @@ class Chunk:
 
     def label(self) -> str:
         return f"[{self.source}#{self.index}]" + (f" ({self.section})" if self.section else "")
+
+    def render(self) -> str:
+        """How a chunk is shown to the model: citation label, document context, text."""
+        note = f"\n(About this document: {self.doc_note})" if self.doc_note else ""
+        return f"{self.label()}{note}\n{self.text}"
 
 
 @dataclass
@@ -108,13 +114,34 @@ def _chunk(text: str, size: int = 800, overlap: int = 150) -> list[str]:
     return chunks
 
 
+def _doc_note(sections: list[tuple[str, str]], max_chars: int = 300) -> tuple[str, str]:
+    """The document's intro: text before the first subsection (Markdown) or its first paragraph.
+
+    Returns (section the intro came from, note). Chunks deep inside a document otherwise lose
+    facts stated once at the top, such as "Effective 2026-03-01" or "Status: SUPERSEDED".
+    """
+    if not sections:
+        return "", ""
+    section, body = sections[0]
+    if " > " in section:  # document starts straight with a subsection: no intro
+        return "", ""
+    paras = [p.strip() for p in re.split(r"\n\s*\n", body) if p.strip()]
+    if not section and paras:  # plain text: the first paragraph is usually a title
+        paras = paras[:1]
+    note = " ".join(" ".join(paras).split())
+    return section, (note[: max_chars - 3] + "...") if len(note) > max_chars else note
+
+
 def chunk_document(source: str, text: str, markdown: bool) -> list[Chunk]:
+    sections = _sections(text, markdown)
+    _, note = _doc_note(sections)
     chunks: list[Chunk] = []
-    for section, body in _sections(text, markdown):
+    for section, body in sections:
         for piece in _chunk(body):
             i = len(chunks)
+            # The document's first chunk contains the intro itself.
             cid = hashlib.sha1(f"{source}:{i}".encode()).hexdigest()[:16]
-            chunks.append(Chunk(cid, source, i, piece, section))
+            chunks.append(Chunk(cid, source, i, piece, section, "" if i == 0 else note))
     return chunks
 
 

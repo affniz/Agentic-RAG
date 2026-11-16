@@ -39,7 +39,7 @@ class NaiveRag:
 
     def ask(self, question: str) -> Answer:
         hits = self.kb.search(question, k=self.k)
-        context = "\n\n".join(f"{c.label()}\n{c.text}" for c, _ in hits) or "(no results)"
+        context = "\n\n".join(c.render() for c, _ in hits) or "(no results)"
         messages = [{"role": "user", "content": f"<context>\n{context}\n</context>\n\nQuestion: {question}"}]
         with self.client.beta.messages.stream(
             model=self.model,

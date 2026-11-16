@@ -77,3 +77,18 @@ def test_reranker_reorders(tmp_path):
     top = kb.search("vacation carry over", k=1)[0][0]
     assert top.source == "travel.txt"  # fake reranker prefers the London chunk
     assert kb.search("vacation carry over", k=1, rerank=False)[0][0].source == "vacation.md"
+
+
+def test_document_intro_is_attached_to_every_chunk():
+    md = "# Travel Policy 2025\nStatus: SUPERSEDED. In force until 2026-02-28.\n\n## Hotels\nTier 1: $320\n## Flights\nEconomy."
+    chunks = chunk_document("t.md", md, markdown=True)
+    intro, hotels, flights = chunks
+    assert intro.doc_note == ""  # the intro chunk already contains it
+    assert hotels.doc_note == flights.doc_note == "Status: SUPERSEDED. In force until 2026-02-28."
+    assert hotels.render().splitlines()[1] == "(About this document: Status: SUPERSEDED. In force until 2026-02-28.)"
+    assert "SUPERSEDED" not in hotels.indexed_text  # display only; retrieval is unchanged
+
+    # No intro (title straight into a subsection) -> no note; plain text uses its first paragraph.
+    assert all(c.doc_note == "" for c in chunk_document("r.md", "# Notes\n## v1\nx\n## v2\ny", markdown=True))
+    txt = chunk_document("p.txt", "Expense Policy\n\n" + "\n\n".join("rule " * 40 for _ in range(6)), markdown=False)
+    assert txt[0].doc_note == "" and txt[-1].doc_note == "Expense Policy"

@@ -89,6 +89,7 @@ def _compose(result: str) -> str:
         return "I couldn't find anything about that in the knowledge base."
     lines = ["**Demo mode** - no model is called; these are the top search hits.\n"]
     for label, body in hits[:2]:
+        body = re.sub(r"^\(About this document:.*?\)\n", "", body)
         sentence = " ".join(body.split())[:220]
         lines.append(f"- {sentence} {label}")
     return "\n".join(lines)
