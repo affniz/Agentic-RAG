@@ -17,7 +17,7 @@ question ─► Claude (claude-haiku-5-5) ──tool calls──► list_documen
 
 | File | Role |
 |---|---|
-| `rag/store.py` | Loads `.md` / `.txt` / `.pdf`; heading-aware chunking (each chunk knows its Markdown section path); incremental indexing into ChromaDB (local all-MiniLM-L6-v2 ONNX embeddings) + BM25; hybrid search with Reciprocal Rank Fusion; optional local cross-encoder reranking |
+| `rag/store.py` | Loads `.md` / `.txt` / `.pdf`; heading-aware chunking (each chunk knows its Markdown section path); incremental per-chunk indexing (content-hashed chunk ids, so an edit only re-embeds the chunks it changed) into ChromaDB (local all-MiniLM-L6-v2 ONNX embeddings) + BM25; hybrid search with Reciprocal Rank Fusion; optional local cross-encoder reranking |
 | `rag/agent.py` | The agent loop: strict tool schemas, parallel tool execution, multi-turn memory, step limit, refusal / `max_tokens` handling, event callbacks, per-question cost tracking |
 | `rag/evaluate.py` | Retrieval metrics, and answer grading that compares the agent with the one-shot baseline per question category |
 | `rag/baseline.py` | One-shot RAG baseline (retrieve once, answer once) for comparison |
@@ -44,7 +44,7 @@ downloaded, search keeps working without it (or pass `--no-rerank`).
 ## Usage
 
 ```bash
-python main.py ingest docs                 # sync the index; only new/changed files are re-embedded
+python main.py ingest docs                 # sync the index; only new or edited chunks are re-embedded
 python main.py ingest docs --rebuild       # re-embed everything
 python main.py search "carry over"         # test retrieval alone, no API call (--mode bm25|vector|hybrid)
 python main.py ask "How many vacation days do I get after 6 years, and how many can I carry over?"
@@ -102,6 +102,31 @@ models without touching chat. Each run records the settings it used.
 - Other settings: `RAG_DOCS` (documents folder, default `./docs`), `RAG_INDEX` (index directory), `RAG_RERANK=0` (turn off the reranker), `RAG_DATA` (settings, feedback and eval-set indexes, default `./.rag_data`), `RAG_EVALS` (eval sets and results, default `./evals`).
 - Conversations are kept in memory for now and are lost when the server restarts; settings and feedback are saved in `RAG_DATA`.
 - In demo mode the eval dashboard works too, with a keyword-matching stand-in judge: free, but the scores mean nothing.
+
+## Docker
+
+One image serves the web UI and the API. The embedding model (and, by default, the reranker) are
+baked in, so it starts quickly and indexes without network access.
+
+```bash
+docker build -t agentic-rag .
+docker run -p 8000:8000 -e ANTHROPIC_API_KEY -v rag-data:/data agentic-rag   # http://localhost:8000
+```
+
+- **Demo mode** (no API key, real search, fake model): `docker run -p 8000:8000 -e RAG_FAKE_LLM=1 agentic-rag`.
+- **Your documents:** mount them over the samples with `-v /path/to/docs:/app/docs`, then click **Re-index** on the Documents screen.
+- **What persists:** the index, settings and feedback live in the `/data` volume. Eval results are written inside the container.
+- **Build without the reranker** (e.g. where Hugging Face is unreachable): `--build-arg BAKE_RERANKER=0`; it is then downloaded on first use, and search works without it if that fails.
+- `scripts/docker_smoke_test.sh [image]` checks a built image end to end in demo mode.
+
+## CI
+
+`.github/workflows/ci.yml` runs on every pull request and push to `main`:
+
+1. **Python tests:** `pytest`; no API key needed.
+2. **Frontend:** type-check and production build.
+3. **Docker image:** builds the image and runs the smoke test. On pushes to `main` it also publishes
+   `ghcr.io/<owner>/<repo>:latest` and `:sha-<commit>` to the GitHub Container Registry.
 
 ## Evaluation
 
