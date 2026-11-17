@@ -103,6 +103,31 @@ models without touching chat. Each run records the settings it used.
 - Conversations are kept in memory for now and are lost when the server restarts; settings and feedback are saved in `RAG_DATA`.
 - In demo mode the eval dashboard works too, with a keyword-matching stand-in judge: free, but the scores mean nothing.
 
+## Docker
+
+One image serves the web UI and the API. The embedding model (and, by default, the reranker) are
+baked in, so it starts quickly and indexes without network access.
+
+```bash
+docker build -t agentic-rag .
+docker run -p 8000:8000 -e ANTHROPIC_API_KEY -v rag-data:/data agentic-rag   # http://localhost:8000
+```
+
+- **Demo mode** (no API key, real search, fake model): `docker run -p 8000:8000 -e RAG_FAKE_LLM=1 agentic-rag`.
+- **Your documents:** mount them over the samples with `-v /path/to/docs:/app/docs`, then click **Re-index** on the Documents screen.
+- **What persists:** the index, settings and feedback live in the `/data` volume. Eval results are written inside the container.
+- **Build without the reranker** (e.g. where Hugging Face is unreachable): `--build-arg BAKE_RERANKER=0`; it is then downloaded on first use, and search works without it if that fails.
+- `scripts/docker_smoke_test.sh [image]` checks a built image end to end in demo mode.
+
+## CI
+
+`.github/workflows/ci.yml` runs on every pull request and push to `main`:
+
+1. **Python tests:** `pytest`; no API key needed.
+2. **Frontend:** type-check and production build.
+3. **Docker image:** builds the image and runs the smoke test. On pushes to `main` it also publishes
+   `ghcr.io/<owner>/<repo>:latest` and `:sha-<commit>` to the GitHub Container Registry.
+
 ## Evaluation
 
 Two eval sets ship with the repo, each a folder with `questions.jsonl`, `config.json` and its own documents:
