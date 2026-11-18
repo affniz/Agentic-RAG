@@ -10,18 +10,27 @@ from typing import Any, Callable
 
 import anthropic
 
+from .models import PRICES, call_cost, request_options
 from .store import KnowledgeBase
+
+_ = PRICES  # re-exported: other modules import PRICES from here
 
 # Haiku 5.5 matched Sonnet 5.5 within one question on evals/hard (95% vs 98%) at ~1/16 the cost.
 MODEL = "claude-haiku-5-5"
 
-# USD per million tokens: (input, output, cache read, cache write). List prices; used for
-# the per-question cost estimate only. If a refusal fallback serves a turn, the real price
-# is that of the fallback model.
-PRICES: dict[str, tuple[float, float, float, float]] = {
-    "claude-sonnet-5-5": (2.00, 10.00, 0.10, 2.50),
-    "claude-opus-5-5": (4.00, 20.00, 0.20, 5.00),
-    "claude-haiku-5-5": (0.10, 0.50, 0.01, 0.125),
+# Server-side context editing: once a request's prompt passes `trigger`, the API clears the
+# oldest tool results (search output) and keeps the most recent `keep` tool uses. This stops a
+# long chat from resending every earlier question's search results. It runs on the server, so
+# our own `messages` stay append-only, which the API requires for replaying thinking blocks.
+CONTEXT_EDITING_BETA = "context-management-2025-06-27"
+CONTEXT_MANAGEMENT: dict[str, Any] = {
+    "edits": [{
+        "type": "clear_tool_uses_20250919",
+        "trigger": {"type": "input_tokens", "value": 30_000},
+        "keep": {"type": "tool_uses", "value": 6},
+        # Each clear resets the prompt cache, so only clear when it saves a worthwhile amount.
+        "clear_at_least": {"type": "input_tokens", "value": 10_000},
+    }]
 }
 
 CITATION_RE = re.compile(r"\[([^\[\]#\n]+)#(\d+)\]")
@@ -167,24 +176,32 @@ class Usage:
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
     api_calls: int = 0
+    cost_usd: float | None = 0.0  # summed per call, since a call's price can depend on its prompt size
 
-    def add(self, u: Any) -> None:
-        self.input_tokens += u.input_tokens or 0
-        self.output_tokens += u.output_tokens or 0
-        self.cache_read_tokens += getattr(u, "cache_read_input_tokens", 0) or 0
-        self.cache_write_tokens += getattr(u, "cache_creation_input_tokens", 0) or 0
+    def add(self, u: Any, model: str) -> None:
+        """Count one API call's usage and price it at `model`'s rates (None if unknown)."""
+        i, o = u.input_tokens or 0, u.output_tokens or 0
+        cr = getattr(u, "cache_read_input_tokens", 0) or 0
+        cw = getattr(u, "cache_creation_input_tokens", 0) or 0
+        self.input_tokens += i
+        self.output_tokens += o
+        self.cache_read_tokens += cr
+        self.cache_write_tokens += cw
         self.api_calls += 1
+        c = call_cost(model, i, o, cr, cw)
+        self.cost_usd = None if c is None or self.cost_usd is None else self.cost_usd + c
 
-    def cost(self, model: str) -> float | None:
-        p = PRICES.get(model)
-        if p is None:
-            return None
-        return (
-            self.input_tokens * p[0]
-            + self.output_tokens * p[1]
-            + self.cache_read_tokens * p[2]
-            + self.cache_write_tokens * p[3]
-        ) / 1_000_000
+    def merge(self, other: "Usage") -> None:
+        self.input_tokens += other.input_tokens
+        self.output_tokens += other.output_tokens
+        self.cache_read_tokens += other.cache_read_tokens
+        self.cache_write_tokens += other.cache_write_tokens
+        self.api_calls += other.api_calls
+        self.cost_usd = None if other.cost_usd is None or self.cost_usd is None else self.cost_usd + other.cost_usd
+
+    def cost(self, model: str | None = None) -> float | None:
+        """Total cost in USD (list prices). `model` is accepted for compatibility and ignored."""
+        return self.cost_usd
 
 
 @dataclass
@@ -251,9 +268,9 @@ class RagAgent:
             messages=self.messages,
             output_config={"effort": self.effort},
             cache_control={"type": "ephemeral"},  # cache the growing conversation prefix
-            # If a safety classifier declines, the API retries on a fallback model.
-            betas=["server-side-fallback-2026-07-01"],
-            fallbacks="default",
+            context_management=CONTEXT_MANAGEMENT,
+            # Context editing beta, plus a refusal fallback on models that have one.
+            **request_options(self.model, [CONTEXT_EDITING_BETA]),
             **extra,
         )
 
@@ -273,12 +290,8 @@ class RagAgent:
         self._seen.clear()
 
         def finish(text: str, stop: str) -> Answer:
-            self.total.input_tokens += usage.input_tokens
-            self.total.output_tokens += usage.output_tokens
-            self.total.cache_read_tokens += usage.cache_read_tokens
-            self.total.cache_write_tokens += usage.cache_write_tokens
-            self.total.api_calls += usage.api_calls
-            ans = Answer(text, usage, usage.cost(self.model), calls, stop, self._citations(text),
+            self.total.merge(usage)
+            ans = Answer(text, usage, usage.cost_usd, calls, stop, self._citations(text),
                          list(dict.fromkeys(self._seen)))
             self.on_event({"type": "answer", "text": text, "stop": stop, "citations": ans.citations})
             self.on_event({"type": "usage", "usage": usage, "cost_usd": ans.cost_usd})
@@ -286,7 +299,7 @@ class RagAgent:
 
         for _ in range(self.max_steps):
             response = self._create()
-            usage.add(response.usage)
+            usage.add(response.usage, _served_by(response, self.model))
             # Append the full content (thinking + tool_use blocks), never just the text.
             self.messages.append({"role": "assistant", "content": response.content})
 
@@ -317,7 +330,7 @@ class RagAgent:
         # Out of steps: ask for a final answer with what it has (no more tools).
         self.messages.append({"role": "user", "content": "Stop searching and answer now with the evidence you have."})
         response = self._create(tool_choice={"type": "none"})
-        usage.add(response.usage)
+        usage.add(response.usage, _served_by(response, self.model))
         self.messages.append({"role": "assistant", "content": response.content})
         return finish(_text(response) or "(no text in response)", "step_limit")
 
@@ -340,3 +353,9 @@ class RagAgent:
 
 def _text(response: Any) -> str:
     return "".join(b.text for b in response.content if b.type == "text").strip()
+
+
+def _served_by(response: Any, requested: str) -> str:
+    """The model that produced a response: the fallback model if a refusal fallback served it."""
+    model = getattr(response, "model", None)
+    return model if isinstance(model, str) and model else requested

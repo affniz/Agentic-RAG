@@ -300,6 +300,52 @@ def test_ingest_prunes_transcriptions_of_removed_or_replaced_files(tmp_path):
     assert not list((tmp_path / "idx" / "ocr").glob("*.md"))
 
 
+def test_long_paragraph_splits_at_sentence_ends_without_cutting_words():
+    from rag.store import _chunk
+
+    sentences = [f"Sentence {i} has " + " ".join(f"w{i:02d}x{j}" for j in range(12)) + "." for i in range(40)]
+    words = set(" ".join(sentences).split())
+    chunks = _chunk(" ".join(sentences), size=300, overlap=80)
+    assert len(chunks) > 5
+    for c in chunks:
+        assert len(c) <= 300
+        assert set(c.split()) <= words  # every token is a whole word from the source
+        assert c.endswith(".")  # pieces end at a sentence end
+    joined = " ".join(chunks)
+    assert all(s in joined for s in sentences)  # nothing lost
+
+
+def test_long_table_splits_at_row_boundaries():
+    from rag.store import _chunk
+
+    rows = [f"| row {i} | value {i * 7} |" for i in range(60)]
+    chunks = _chunk("\n".join(rows), size=200, overlap=50)
+    for c in chunks:
+        assert all(line in rows for line in c.split("\n"))  # whole rows only
+    assert {r for c in chunks for r in c.split("\n")} == set(rows)
+
+
+def test_overlong_word_is_the_only_thing_cut():
+    from rag.store import _chunk
+
+    chunks = _chunk("a" * 250 + " tail words.", size=100, overlap=20)
+    assert all(len(c) <= 100 for c in chunks) and chunks[-1].endswith("tail words.")
+
+
+def test_get_chunks_and_sources_use_the_per_document_index(tmp_path):
+    d = tmp_path / "docs"
+    d.mkdir()
+    (d / "a.md").write_text("# A\n" + "\n\n".join(f"## S{i}\nPara {i} text." for i in range(5)))
+    (d / "b.txt").write_text("Only one paragraph.")
+    kb = KnowledgeBase(tmp_path / "idx", rerank=False)
+    kb.ingest(d)
+    assert kb.sources() == {"a.md": 5, "b.txt": 1}
+    assert [c.index for c in kb.get_chunks("a.md", 1, 3)] == [1, 2, 3]
+    assert [c.index for c in kb.get_chunks("a.md", 3, 99)] == [3, 4]
+    assert kb.get_chunks("a.md", 4, 2) == [] and kb.get_chunks("nope.md", 0, 5) == []
+    assert all(c.source == "a.md" for c in kb.get_chunks("a.md", 0, 4))
+
+
 # ---------------------------------------------------------------- incremental, per-chunk updates
 
 

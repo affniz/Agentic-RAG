@@ -121,6 +121,7 @@ export type DocumentsResponse = {
 export type UploadResponse = {
   saved: string[];
   rejected: { name: string; reason: string }[];
+  conflicts: string[]; // names that already exist; not saved unless re-sent with overwrite
   ingest: IngestState | null;
 };
 
@@ -174,6 +175,7 @@ export type EvalRun = {
   repeats?: number;
   naive_k?: number;
   judge_model?: string;
+  judge_same_as_answer?: boolean;
   max_steps?: number;
   search_k?: number | null;
   rerank?: boolean;

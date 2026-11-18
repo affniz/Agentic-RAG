@@ -157,3 +157,78 @@ def test_deleting_a_transcribed_pdf_deletes_its_transcription(client):
     wait_ingest(c)
     row = next(d for d in c.get("/api/documents").json()["documents"] if d["name"] == "scan.pdf")
     assert row["transcribed"] is False and row["status"] == "empty"
+
+
+def test_upload_conflict_asks_before_overwriting(client):
+    c = client
+    original = (c.docs / "vacation.md").read_text()
+    r = c.post("/api/documents", files=[
+        ("files", ("vacation.md", b"# Vacation\nNew policy: 10 days carry over.", "text/markdown")),
+        ("files", ("travel.txt", b"Travel Policy\n\nHotel cap is $350.", "text/plain")),
+    ]).json()
+    assert r["conflicts"] == ["vacation.md"] and r["saved"] == ["travel.txt"]
+    assert (c.docs / "vacation.md").read_text() == original  # untouched
+    wait_ingest(c)
+
+    r = c.post("/api/documents", params={"overwrite": "true"}, files=[
+        ("files", ("vacation.md", b"# Vacation\nNew policy: 10 days carry over.", "text/markdown"))]).json()
+    assert r["saved"] == ["vacation.md"] and r["conflicts"] == []
+    assert "10 days" in (c.docs / "vacation.md").read_text()
+    wait_ingest(c)
+    assert statuses(c) == {"vacation.md": "indexed", "travel.txt": "indexed"}
+
+
+def test_upload_during_ingest_runs_another_pass(client, monkeypatch):
+    import threading
+
+    from rag.store import KnowledgeBase
+
+    c = client
+    scanned, release = threading.Event(), threading.Event()
+    reports = []
+    original = KnowledgeBase.ingest
+
+    def slow_ingest(self, *args, **kwargs):
+        report = original(self, *args, **kwargs)
+        reports.append(report)
+        if len(reports) == 1:  # the first pass has scanned the folder; hold it open
+            scanned.set()
+            assert release.wait(10)
+        return report
+
+    monkeypatch.setattr(KnowledgeBase, "ingest", slow_ingest)
+    assert c.post("/api/ingest", json={}).json()["state"] == "running"
+    assert scanned.wait(10)
+    r = c.post("/api/documents", files=[("files", ("late.md", b"# Late\nAdded mid-ingest.", "text/markdown"))]).json()
+    assert r["saved"] == ["late.md"] and r["ingest"]["state"] == "running" and r["ingest"]["reason"] == "manual"
+    assert c.get("/api/ingest").json()["state"] == "running"
+    release.set()
+
+    st = wait_ingest(c)
+    assert len(reports) == 2 and reports[0].added == ["vacation.md"]
+    assert st["state"] == "done" and st["reason"] == "upload" and st["report"]["added"] == ["late.md"]
+    assert statuses(c) == {"vacation.md": "indexed", "late.md": "indexed"}
+    assert c.post("/api/ingest", json={}).json()["state"] == "running"  # the lock was released
+    wait_ingest(c)
+
+
+def test_listing_reuses_hashes_of_unchanged_files(client, monkeypatch):
+    import server.documents as documents
+    from tests.test_store import _blank_pdf
+
+    c = client
+    _blank_pdf(c.docs / "scan.pdf", pages=2)
+    hashed, parsed = [], []
+    digest, pages = documents._file_digest, documents._pdf_pages
+    monkeypatch.setattr(documents, "_file_digest", lambda p: hashed.append(p.name) or digest(p))
+    monkeypatch.setattr(documents, "_pdf_pages", lambda p: parsed.append(p.name) or pages(p))
+
+    first = c.get("/api/documents").json()["documents"]
+    assert sorted(hashed) == ["scan.pdf", "vacation.md"] and parsed == ["scan.pdf"]
+    hashed.clear(), parsed.clear()
+    assert c.get("/api/documents").json()["documents"] == first
+    assert hashed == [] and parsed == []
+
+    (c.docs / "vacation.md").write_text("# Vacation\nRewritten.")
+    rows = {d["name"]: d for d in c.get("/api/documents").json()["documents"]}
+    assert hashed == ["vacation.md"] and parsed == [] and rows["scan.pdf"]["pages"] == 2

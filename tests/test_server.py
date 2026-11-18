@@ -155,3 +155,120 @@ def test_eval_run_model_override_leaves_settings_alone(client):
     assert (run["model"], run["effort"]) == ("claude-sonnet-5-5", "high")
     assert client.get("/api/settings").json() == before
     assert client.post("/api/evals/run", json={"kind": "answers", "set": "mini", "model": "gpt-4"}).status_code == 400
+
+
+# ---------------------------------------------------------------- localhost guard
+
+
+def test_bad_host_is_rejected(client):
+    r = client.get("/api/health", headers={"Host": "evil.example"})
+    assert r.status_code == 403 and "evil.example" in r.json()["detail"]
+    # DNS rebinding with a port, or a name that only ends like localhost, is rejected too.
+    assert client.get("/api/health", headers={"Host": "evil.example:8000"}).status_code == 403
+    assert client.get("/api/health", headers={"Host": "notlocalhost"}).status_code == 403
+    for host in ["localhost:8000", "127.0.0.1", "[::1]:8000", "app.localhost:5173"]:
+        assert client.get("/api/health", headers={"Host": host}).status_code == 200, host
+
+
+def test_extra_hosts_from_env(client, monkeypatch):
+    import server.app as app_module
+
+    monkeypatch.setenv("RAG_ALLOWED_HOSTS", "rag.lan, Other.Example")
+    app_module = importlib.reload(app_module)
+    c = TestClient(app_module.app)
+    assert c.get("/api/health", headers={"Host": "rag.lan:8000"}).status_code == 200
+    assert c.get("/api/health", headers={"Host": "other.example"}).status_code == 200
+    assert c.post("/api/chat", json={"message": "x", "model": "gpt-4"},
+                  headers={"Host": "rag.lan", "Origin": "http://rag.lan:8000"}).status_code == 400
+
+
+def test_cross_site_post_is_rejected(client):
+    for headers in [{"Origin": "http://evil.example"}, {"Origin": "null"},
+                    {"Origin": "http://localhost.evil.example:8000"}, {"Sec-Fetch-Site": "cross-site"}]:
+        r = client.post("/api/chat", json={"message": "hi"}, headers={"Host": "localhost:8000", **headers})
+        assert r.status_code == 403, headers
+        assert client.delete("/api/conversations", headers={"Host": "localhost", **headers}).status_code == 403
+    # A multipart upload (no CORS preflight) from another site is the main thing to stop.
+    r = client.post("/api/documents", files={"files": ("x.md", b"# x")},
+                    headers={"Host": "localhost:8000", "Origin": "http://evil.example"})
+    assert r.status_code == 403
+    assert client.get("/api/conversations").json() == []  # nothing was created
+
+
+def test_same_origin_post_passes(client):
+    # The Vite dev server proxies :5173 -> :8000; only the hostname is compared.
+    for origin, site in [("http://localhost:8000", "same-origin"), ("http://localhost:5173", "same-site"),
+                         ("http://127.0.0.1:8000", "same-origin"), ("http://[::1]:8000", "same-origin")]:
+        r = client.post("/api/chat", json={"message": "carry over"},
+                        headers={"Host": "localhost:8000", "Origin": origin, "Sec-Fetch-Site": site})
+        assert r.status_code == 200, origin
+        assert events(r)[-1]["type"] == "done"
+    assert client.get("/api/conversations", headers={"Origin": "http://evil.example"}).status_code == 200  # reads: Host only
+
+
+# ---------------------------------------------------------------- saved conversations
+
+
+def test_conversation_survives_restart(client, tmp_path):
+    import server.app as app_module
+
+    cid = events(client.post("/api/chat", json={"message": "how many days carry over?"}))[0]["id"]
+    turn_id = app_module.conversations[cid].turns[1].id
+    client.put(f"/api/feedback/{turn_id}", json={"conversation_id": cid, "rating": "up"})
+    path = tmp_path / "data" / "conversations" / f"{cid}.json"
+    saved = json.loads(path.read_text())
+    assert saved["model"] == "claude-haiku-5-5" and len(saved["messages"]) == 4  # question, tool_use, results, answer
+    assert saved["messages"][1]["content"][0]["type"] == "tool_use"  # fake-client blocks saved as dicts
+    before = client.get(f"/api/conversations/{cid}").json()
+
+    app_module = importlib.reload(app_module)  # same RAG_DATA: a server restart
+    app_module.client.delay = 0
+    c = TestClient(app_module.app)
+    assert c.get(f"/api/conversations/{cid}").json() == before
+    assert app_module.conversations[cid].agent.messages == saved["messages"]
+
+    # Follow-ups continue the restored history.
+    evs = events(c.post("/api/chat", json={"message": "and when?", "conversation_id": cid}))
+    assert next(e for e in evs if e["type"] == "answer")["citations"][0]["source"] == "vacation.md"
+    assert len(json.loads(path.read_text())["messages"]) == 8
+    assert [m["role"] for m in c.get(f"/api/conversations/{cid}").json()["messages"]] == ["user", "assistant"] * 2
+
+    assert c.delete(f"/api/conversations/{cid}").json() == {"ok": True}
+    assert not path.exists()
+    assert importlib.reload(app_module).conversations == {}
+
+
+def test_reset_deletes_files_and_bad_files_are_skipped(client, tmp_path):
+    import server.app as app_module
+
+    events(client.post("/api/chat", json={"message": "carry over"}))
+    folder = tmp_path / "data" / "conversations"
+    assert len(list(folder.glob("*.json"))) == 1
+    client.delete("/api/conversations")
+    assert list(folder.glob("*.json")) == []
+
+    (folder / "broken.json").write_text("{not json")
+    (folder / "other.json").write_text(json.dumps({"id": "mismatch"}))
+    assert importlib.reload(app_module).conversations == {}
+
+
+def test_message_content_serialization():
+    from types import SimpleNamespace as NS
+
+    from anthropic.types.beta import BetaTextBlock, BetaThinkingBlock, BetaToolUseBlock
+
+    from server.conversations import jsonable
+
+    thinking = BetaThinkingBlock(type="thinking", thinking="Let me look.", signature="c2lnbmF0dXJl")
+    content = [thinking, BetaToolUseBlock(type="tool_use", id="t1", name="search", input={"q": "x"}),
+               BetaTextBlock(type="text", text="Hi", citations=None), NS(type="text", text="fake", extra=NS(a=[1]))]
+    out = jsonable([{"role": "assistant", "content": content}, {"role": "user", "content": "plain"}])
+    assert json.loads(json.dumps(out)) == out
+    blocks = out[0]["content"]
+    assert blocks[0] == {"type": "thinking", "thinking": "Let me look.", "signature": "c2lnbmF0dXJl"}
+    assert BetaThinkingBlock.model_validate(blocks[0]) == thinking  # round-trips unchanged
+    assert blocks[1] == {"type": "tool_use", "id": "t1", "name": "search", "input": {"q": "x"}}
+    assert blocks[2] == {"type": "text", "text": "Hi"}  # None fields dropped
+    assert blocks[3] == {"type": "text", "text": "fake", "extra": {"a": [1]}}
+    with pytest.raises(TypeError):
+        jsonable(object())

@@ -1,0 +1,6 @@
+{
+  "name": "holdout",
+  "docs": "docs",
+  "today": "2026-11-16",
+  "description": "Held-out set: a different fictional company (Quillfeather Logistics), written after the agent and prompts were tuned on evals/hard. Never use it to tune prompts, chunking or retrieval - only to check that results on evals/hard generalise."
+}

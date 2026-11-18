@@ -43,10 +43,11 @@ export const api = {
 
   documents: () => fetch("/api/documents").then(json<DocumentsResponse>),
   documentChunks: (name: string) => fetch(`/api/documents/${path(name)}/chunks`).then(json<DocChunks>),
-  upload: (files: File[]) => {
+  upload: (files: File[], overwrite = false) => {
     const form = new FormData();
     files.forEach((f) => form.append("files", f));
-    return fetch("/api/documents", { method: "POST", body: form }).then(json<UploadResponse>);
+    return fetch(`/api/documents${overwrite ? "?overwrite=true" : ""}`, { method: "POST", body: form })
+      .then(json<UploadResponse>);
   },
   deleteDocument: (name: string) => fetch(`/api/documents/${path(name)}`, { method: "DELETE" }).then(json),
   transcribe: (name: string) => fetch(`/api/documents/${path(name)}/transcribe`, { method: "POST" }).then(json<IngestState>),

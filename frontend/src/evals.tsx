@@ -53,7 +53,9 @@ export function EvalsPage({ health, settings }: { health: Health | null; setting
       setSets(s);
       setRuns(r);
       setJob(j);
-      setSetName((cur) => cur || (s.find((x) => x.name === "hard") ?? s[0])?.name || "");
+      // Open on the set of the most recent run (CLI runs included), so a new run is visible right away.
+      const latest = [...r].sort((a, b) => b.created_at - a.created_at).find((x) => s.some((es) => es.name === x.set));
+      setSetName((cur) => cur || latest?.set || (s.find((x) => x.name === "hard") ?? s[0])?.name || "");
     } catch (e) {
       setError((e as Error).message);
     }
@@ -555,6 +557,12 @@ function RunDetail({ file, onClose }: { file: string; onClose: () => void }) {
             {summary.max_steps != null && <> · step limit {summary.max_steps}</>}
             {summary.search_k != null && <> · {summary.search_k} results/search</>}
             {summary.rerank === false && <> · no reranking</>} · judged by {modelLabel(summary.judge_model ?? "")}
+            {summary.judge_same_as_answer && (
+              <span title="The judge graded answers written by the same model, which can inflate the score."
+                className="ml-2 rounded bg-amber-100 px-1.5 py-0.5 text-xs text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">
+                judge = answer model
+              </span>
+            )}
           </p>
         </div>
         <button onClick={onClose} aria-label="Close results" className="rounded p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800">{Icon.x()}</button>

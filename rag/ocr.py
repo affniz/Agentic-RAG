@@ -13,6 +13,8 @@ from typing import Any, Callable
 
 import anthropic
 
+from .models import request_options
+
 OCR_MODEL = "claude-haiku-5-5"
 MAX_PDF_BYTES = 32 * 1024 * 1024  # API request limit for inline PDFs
 
@@ -33,7 +35,9 @@ def claude_pdf_transcriber(model: str = OCR_MODEL, client: Any = None) -> Callab
         if len(data) > MAX_PDF_BYTES:
             print(f"[ocr] {path.name}: larger than 32 MB, skipped", file=sys.stderr)
             return ""
-        with client.messages.stream(
+        opts = request_options(model)  # a refusal fallback needs the beta endpoint
+        api = client.beta.messages if opts else client.messages
+        with api.stream(
             model=model,
             max_tokens=32000,
             output_config={"effort": "low"},
@@ -45,6 +49,7 @@ def claude_pdf_transcriber(model: str = OCR_MODEL, client: Any = None) -> Callab
                     {"type": "text", "text": PROMPT},
                 ],
             }],
+            **opts,
         ) as stream:
             msg = stream.get_final_message()
         if msg.stop_reason == "refusal":

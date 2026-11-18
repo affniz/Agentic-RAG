@@ -21,9 +21,12 @@ from pydantic import BaseModel
 
 from .agent import AGENT_INSTRUCTIONS_V1, Answer, RagAgent, SearchOptions, Usage
 from .baseline import NaiveRag
+from .models import request_options
 from .store import KnowledgeBase
 
-JUDGE_MODEL = "claude-haiku-5-5"
+# A different (stronger) model than the default answering model (Haiku), so the judge isn't
+# grading its own answers. Answer evals warn when the judge and answering model are the same.
+JUDGE_MODEL = "claude-sonnet-5-5"
 SYSTEMS = ("agentic", "agentic-v1", "naive")
 
 
@@ -146,7 +149,9 @@ wording, and extra detail that doesn't contradict the reference."""
 
 
 def judge(client: Any, q: dict[str, Any], answer: str, model: str = JUDGE_MODEL) -> tuple[Verdict, Any]:
-    response = client.messages.parse(
+    opts = request_options(model)  # refusal fallback where the model has one (needs the beta endpoint)
+    api = client.beta.messages if opts else client.messages
+    response = api.parse(
         model=model,
         max_tokens=4000,
         output_config={"effort": "low"},
@@ -157,6 +162,7 @@ def judge(client: Any, q: dict[str, Any], answer: str, model: str = JUDGE_MODEL)
             }
         ],
         output_format=Verdict,
+        **opts,
     )
     if response.parsed_output is None:  # refusal or truncation
         return Verdict(reasoning=f"judge returned no verdict ({response.stop_reason})", verdict="incorrect"), response.usage
@@ -205,6 +211,10 @@ def answer_eval(
     """
     client = client or anthropic.Anthropic()
     repeats = max(1, repeats)
+    judge_same = judge_model == model
+    if judge_same:
+        log(f"Warning: the judge ({judge_model}) is the model being evaluated, so it grades its own answers. "
+            "Pass a different --judge-model for a fairer score.")
     jobs = [(q, s, r) for r in range(repeats) for q in questions for s in systems]
 
     def run(job: tuple[dict[str, Any], str, int]) -> dict[str, Any]:
@@ -252,7 +262,7 @@ def answer_eval(
 
     summary = {"kind": "answers", "set": set_name or label or None, "created_at": time.time(),
                "model": model, "effort": effort, "questions": len(questions), "naive_k": naive_k,
-               "judge_model": judge_model, "repeats": repeats, "max_steps": max_steps, "search_k": search_k,
+               "judge_model": judge_model, "judge_same_as_answer": judge_same, "repeats": repeats, "max_steps": max_steps, "search_k": search_k,
                "rerank": kb.reranker is not None,
                "systems": {s: combine_runs([r for r in rows if r["system"] == s], repeats) for s in systems}}
     out = Path(out_dir)
@@ -319,5 +329,5 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 def _cost(u: Any, model: str) -> float:
     usage = Usage()
-    usage.add(u)
-    return usage.cost(model) or 0.0
+    usage.add(u, model)
+    return usage.cost_usd or 0.0

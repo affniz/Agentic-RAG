@@ -45,7 +45,7 @@ class FakeAnthropic:
     """Demo client for both systems + a judge that marks answers citing offices.md correct."""
 
     def __init__(self):
-        self.beta = DemoClient(delay=0).beta
+        self.beta = NS(messages=NS(stream=DemoClient(delay=0).beta.messages.stream, parse=self._parse))
         self.messages = NS(parse=self._parse)
 
     def _parse(self, **kw):
@@ -73,7 +73,7 @@ def test_answer_eval_compares_systems(kb, tmp_path):
 
 
 def test_shipped_eval_sets_load():
-    for name in ("evals/basic", "evals/hard"):
+    for name in ("evals/basic", "evals/hard", "evals/holdout"):
         es = load_set(name)
         assert es.today == "2026-11-16" and es.docs_dir.is_dir()
         assert all({"id", "question", "evidence", "reference"} <= set(q) for q in es.questions)
@@ -128,3 +128,28 @@ def test_estimate_without_history_is_rough(tmp_path):
     from server.evals import _price, ROUGH_TOKENS
 
     assert 0.0005 < _price("claude-haiku-5-5", ROUGH_TOKENS["agentic"]) < 0.002
+
+
+def test_judge_defaults_to_sonnet_and_flags_self_grading(kb, tmp_path):
+    from rag.evaluate import JUDGE_MODEL
+
+    assert JUDGE_MODEL == "claude-sonnet-5-5"
+    qs = [{"id": "a", "category": "c", "question": "Bangalore tier office", "evidence": [], "sources": [],
+           "reference": "x"}]
+    calls = []
+
+    class RecordingJudge(FakeAnthropic):
+        def _parse(self, **kw):
+            calls.append(kw)
+            return super()._parse(**kw)
+
+    logs = []
+    s = answer_eval(kb, qs, model="claude-haiku-5-5", out_dir=tmp_path, client=RecordingJudge(), log=logs.append)
+    assert s["judge_model"] == "claude-sonnet-5-5" and s["judge_same_as_answer"] is False
+    assert calls[0]["model"] == "claude-sonnet-5-5" and calls[0]["fallbacks"] == "default"
+    assert not any("Warning" in line for line in logs)
+
+    s = answer_eval(kb, qs, model="claude-haiku-5-5", judge_model="claude-haiku-5-5", out_dir=tmp_path,
+                    client=RecordingJudge(), log=logs.append)
+    assert s["judge_same_as_answer"] is True and "fallbacks" not in calls[-1]
+    assert any("grades its own answers" in line for line in logs)

@@ -168,7 +168,8 @@ def make_router(evals_dir: Path, index_root: Path, client_factory: Callable[[], 
                 stats, run = same_set[-1]
                 answered = run["questions"] * stats.get("runs", 1)
                 per_q = stats["cost_usd"] * stats.get("runs", 1) / max(1, answered)
-                judge_per_q.append(stats["judge_cost_usd"] * stats.get("runs", 1) / max(1, answered))
+                if run.get("judge_model", "claude-haiku-5-5") == JUDGE_MODEL:  # older runs used a cheaper judge
+                    judge_per_q.append(stats["judge_cost_usd"] * stats.get("runs", 1) / max(1, answered))
                 calls += stats["avg_api_calls"] * answers
             else:
                 basis = "rough"
@@ -176,7 +177,7 @@ def make_router(evals_dir: Path, index_root: Path, client_factory: Callable[[], 
                 per_q = _price(model, tokens)
                 calls += tokens[2] * answers
             per_system[system] = round(per_q * answers, 4)
-        judge = (sum(judge_per_q) / len(judge_per_q) if judge_per_q and basis == "history"
+        judge = (sum(judge_per_q) / len(judge_per_q) if judge_per_q
                  else _price(JUDGE_MODEL, JUDGE_TOKENS)) * answers * len(req.systems)
         total = sum(per_system.values()) + judge
         return {"total_usd": round(total, 4), "questions": n, "answers": answers, "per_system": per_system,

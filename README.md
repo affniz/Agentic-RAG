@@ -21,9 +21,10 @@ question ─► Claude (claude-haiku-5-5) ──tool calls──► list_documen
 | `rag/agent.py` | The agent loop: strict tool schemas, parallel tool execution, multi-turn memory, step limit, refusal / `max_tokens` handling, event callbacks, per-question cost tracking |
 | `rag/evaluate.py` | Retrieval metrics, and answer grading that compares the agent with the one-shot baseline per question category |
 | `rag/baseline.py` | One-shot RAG baseline (retrieve once, answer once) for comparison |
-| `evals/basic`, `evals/hard` | Eval sets: questions with evidence snippets, expected sources and reference answers, plus the hard set's own documents |
+| `rag/models.py` | Model prices (incl. Haiku's long-prompt tier) and per-model request options such as the refusal fallback |
+| `evals/basic`, `evals/hard`, `evals/holdout` | Eval sets: questions with evidence snippets, expected sources and reference answers, plus the hard set's own documents |
 | `main.py` | CLI |
-| `server/app.py` | FastAPI backend for the web UI: streaming chat over Server-Sent Events, conversations, chunk lookup for citations, settings, feedback |
+| `server/app.py` | FastAPI backend for the web UI: streaming chat over Server-Sent Events, conversations (saved to disk by `server/conversations.py`), chunk lookup for citations, settings, feedback; `server/security.py` limits it to localhost |
 | `server/documents.py`, `server/evals.py`, `server/feedback.py` | Documents API; eval runner (background jobs, cost estimate, run history); settings and feedback storage and export |
 | `frontend/` | React + Vite + Tailwind chat UI |
 | `rag/fake_llm.py` | Stand-in Claude client for tests and for running the UI with no API key (demo mode) |
@@ -33,7 +34,7 @@ question ─► Claude (claude-haiku-5-5) ──tool calls──► list_documen
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements.txt     # or: pip install -r requirements.lock  (exact versions of a known-good setup, Python 3.14)
 export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
@@ -67,7 +68,7 @@ asks what the answer should have been); a conversation list with **New chat** an
 conversations, keeps feedback).
 
 The **Documents** screen (sidebar, or `/#/documents`) manages the knowledge base without the CLI:
-drag-and-drop upload of `.md` / `.txt` / `.pdf` (indexed automatically), a status per file
+drag-and-drop upload of `.md` / `.txt` / `.pdf` (indexed automatically; uploading a file whose name already exists asks before replacing it, and files added or deleted while indexing runs are picked up by one more pass), a status per file
 (indexed / changed on disk / not indexed / deleted), re-index or full rebuild with live progress,
 delete, a viewer showing each document's chunks and the note shown to the model with them, and a
 **search tester** that runs the agent's search tool directly (hybrid, keyword or semantic, with or
@@ -100,7 +101,8 @@ models without touching chat. Each run records the settings it used.
 - **Scanned PDFs** (images of pages, no text layer) can't be read by the text extractor; they show as "No text found". Click **Transcribe** on the file (or **Transcribe with Claude** in the document viewer, which also works for PDFs whose text layer is junk): after a confirmation showing what's sent and the estimated cost, Claude Haiku transcribes the page images and the file is re-indexed. Each file is sent once (the transcription is cached in the index folder; deleting the file, or replacing it with a new version, deletes its transcription), and "Use the PDF's own text instead" undoes it. To transcribe text-less PDFs automatically - e.g. a large folder - start the server with `RAG_OCR=1` or run `python main.py ingest --ocr`.
 - **Encrypted PDFs** that open without a password (common for official documents) are read normally. A PDF that needs a password, or any file that can't be read, is skipped with the reason shown in the Documents table; the rest of the folder is still indexed.
 - Other settings: `RAG_DOCS` (documents folder, default `./docs`), `RAG_INDEX` (index directory), `RAG_RERANK=0` (turn off the reranker), `RAG_DATA` (settings, feedback and eval-set indexes, default `./.rag_data`), `RAG_EVALS` (eval sets and results, default `./evals`).
-- Conversations are kept in memory for now and are lost when the server restarts; settings and feedback are saved in `RAG_DATA`.
+- Conversations, settings and feedback are saved in `RAG_DATA` (`conversations/<id>.json`), so chats survive a restart. Run a single uvicorn worker per `RAG_DATA` folder, or the processes overwrite each other's files.
+- **Local only:** the server answers only requests addressed to `localhost` / `127.0.0.1` / `[::1]` / `*.localhost`, and refuses writes from other sites (cross-site `Origin` or `Sec-Fetch-Site`), so a web page you visit can't upload, delete or start paid evals. There is no login: don't expose it on a network. `RAG_ALLOWED_HOSTS` adds hostnames (comma-separated). See `server/security.py`.
 - In demo mode the eval dashboard works too, with a keyword-matching stand-in judge: free, but the scores mean nothing.
 
 ## Docker
@@ -115,8 +117,9 @@ docker run -p 8000:8000 -e ANTHROPIC_API_KEY -v rag-data:/data agentic-rag   # h
 
 - **Demo mode** (no API key, real search, fake model): `docker run -p 8000:8000 -e RAG_FAKE_LLM=1 agentic-rag`.
 - **Your documents:** mount them over the samples with `-v /path/to/docs:/app/docs`, then click **Re-index** on the Documents screen.
-- **What persists:** the index, settings and feedback live in the `/data` volume. Eval results are written inside the container.
+- **What persists:** the index, settings, feedback and chat conversations live in the `/data` volume. Eval results are written inside the container.
 - **Build without the reranker** (e.g. where Hugging Face is unreachable): `--build-arg BAKE_RERANKER=0`; it is then downloaded on first use, and search works without it if that fails.
+- **Other hostnames:** the server only answers requests addressed to localhost (see *Local only* above). To open it under another name, e.g. on a home server, add `-e RAG_ALLOWED_HOSTS=myhost` - there is still no login.
 - `scripts/docker_smoke_test.sh [image]` checks a built image end to end in demo mode.
 
 ## CI
@@ -130,12 +133,13 @@ docker run -p 8000:8000 -e ANTHROPIC_API_KEY -v rag-data:/data agentic-rag   # h
 
 ## Evaluation
 
-Two eval sets ship with the repo, each a folder with `questions.jsonl`, `config.json` and its own documents:
+Four eval sets ship with the repo, each a folder with `questions.jsonl`, `config.json` and its own documents:
 
 | Set | What it tests |
 |---|---|
 | `evals/basic` (20 questions) | Single-fact lookups over the sample Acme docs. A smoke test - everything should score ~100%. |
 | `evals/past-dates` (7 questions) | Held-out check written after the agent missed a past-date question: answers come from superseded or not-yet-amended rules. Used to verify the fix, not to tune it. |
+| `evals/holdout` (20 questions) | A second fictional company (Quillfeather Logistics, 8 docs) with the hard set's kinds of questions: multi-step lookups, bulletins that override policies, superseded rates, recalls, aggregation, a false premise and an unanswerable question. Written after the agent was tuned on `evals/hard` and **never used for tuning** - run it to check that a gain on the hard set generalises. |
 | `evals/hard` (40 questions) | A fictional company (Halcyon Robotics, 19 docs) built so that **one search with the question text is not enough**: multi-step lookups (person → manager → office → cost tier → hotel cap), policies that were superseded, amended or overridden by a decision log, country exceptions, lists spread across sections, false premises, unanswerable questions, and simple control questions. |
 
 ```bash
@@ -176,21 +180,25 @@ see `Chunk.render()`. That took date-dependent questions from 83% to 100% for *b
 citations, but not accuracy (86% for both).
 
 Every run is saved to `evals/results/` (retrieval runs too), which is what the dashboard's chart reads.
-Answers are graded by a `claude-haiku-5-5` judge against reference answers (`--judge-model` to change),
-and results are saved to `evals/results/`. Other flags: `--category multi_hop`, `--limit N`, `--workers N`, and `--repeats N` - run everything N times and report the mean, the min-max range across runs and the questions whose verdict changed. On these sets one run flips about one answer, so use `--repeats 3` before trusting a difference of a question or two.
+Answers are graded by a `claude-sonnet-5-5` judge against reference answers (`--judge-model` to change), so the
+default Haiku agent isn't graded by itself; a run whose judge is the model being evaluated prints a warning and is
+flagged in the dashboard. The results table above was graded by a Haiku judge, so compare new runs with each other,
+not with it. Other flags: `--category multi_hop`, `--limit N`, `--workers N`, and `--repeats N` - run everything N times and report the mean, the min-max range across runs and the questions whose verdict changed. On these sets one run flips about one answer, so use `--repeats 3` before trusting a difference of a question or two.
 
 Rough cost for the hard set (estimates): Haiku, both systems ≈ $0.15; Sonnet, both systems ≈ $1-2.
 
 ## Tests
 
 ```bash
-pip install -r requirements-dev.txt && pytest -q   # 43 tests, no API key needed
+pip install -r requirements-dev.txt && pytest -q   # no API key needed
 ```
 
 ## Settings worth knowing
 
 - **Model** – `MODEL` in `rag/agent.py` or `--model`. Default `claude-haiku-5-5`: on `evals/hard` it scored 95% against Sonnet 5.5's 98% (one question apart) at about $0.001 per question against $0.014. Use Sonnet or Opus for the extra margin.
 - **Effort** – `medium` by default; `high` helps on hard multi-hop questions.
-- **Refusal fallback** – requests use `fallbacks="default"` (beta `server-side-fallback-2026-07-01`): if a safety classifier declines, the API reruns the request on a fallback model. Remove those two arguments in `rag/agent.py` to turn it off.
+- **Refusal fallback** – Sonnet 5.5 and Opus 5.5 requests use `fallbacks="default"` (beta `server-side-fallback-2026-07-01`): if a safety classifier declines, the API reruns the request on a fallback model. Haiku 5.5 has no server-side fallback, so its requests don't send it and a refusal is shown as such. See `request_options` in `rag/models.py`.
+- **Long chats** – the agent uses server-side context editing (beta `context-management-2025-06-27`): once a request's prompt passes ~30K tokens, the API clears the oldest search results and keeps the 6 most recent tool calls, so follow-up questions don't resend every earlier search. The local history stays append-only. Tune `CONTEXT_MANAGEMENT` in `rag/agent.py`.
+- **Prices** – list prices in `rag/models.py` (checked on the date in `PRICES_CHECKED`); each API call is priced separately, so Haiku calls with prompts over 100K tokens use the higher rate.
 - **Prompt caching** – the conversation prefix is cached automatically, so the agent's repeated calls within a question cost less once the prompt is long enough to be cached.
 - **Step limit** – `max_steps=12` model calls per question; after that it is told to answer with what it has.
