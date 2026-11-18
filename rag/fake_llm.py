@@ -69,8 +69,8 @@ class ScriptedClient:
 class DemoClient:
     def __init__(self, delay: float = 0.03):
         self.delay = delay
-        self.beta = NS(messages=NS(stream=self._stream))
-        self.messages = NS(parse=self._parse)  # the eval judge
+        self.beta = NS(messages=NS(stream=self._stream, parse=self._parse))
+        self.messages = NS(parse=self._parse)  # the eval judge (beta endpoint when it uses a refusal fallback)
 
     def _parse(self, **kw: Any) -> NS:
         """Demo judge: grades by how many of the reference's key terms appear in the answer."""

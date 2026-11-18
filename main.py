@@ -63,7 +63,7 @@ def main() -> None:
     s.add_argument("--naive-k", type=int, default=5, help="chunks the naive baseline retrieves")
     s.add_argument("--model", default=None)
     s.add_argument("--effort", default="medium")
-    s.add_argument("--judge-model", default=None, help="default claude-haiku-5-5")
+    s.add_argument("--judge-model", default=None, help="default claude-sonnet-5-5")
     s.add_argument("--workers", type=int, default=4, help="questions answered in parallel")
     s.add_argument("--category", default=None, help="only questions in this category")
     s.add_argument("--limit", type=int, default=None, help="only the first N questions")

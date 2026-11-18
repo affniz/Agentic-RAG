@@ -41,6 +41,7 @@ export function DocumentsPage({ health, onIndexChanged }: { health: Health | nul
   const [rejected, setRejected] = useState<{ name: string; reason: string }[]>([]);
   const [uploading, setUploading] = useState(false);
   const [confirm, setConfirm] = useState<DocumentRow | null>(null);
+  const [replacing, setReplacing] = useState<File[] | null>(null); // uploads whose names already exist
 
   const refresh = useCallback(async () => {
     try {
@@ -71,13 +72,15 @@ export function DocumentsPage({ health, onIndexChanged }: { health: Health | nul
     return () => clearInterval(t);
   }, [ingest.state, refresh, onIndexChanged]);
 
-  async function upload(files: File[]) {
+  async function upload(files: File[], overwrite = false) {
+    setReplacing(null);
     if (!files.length) return;
     setUploading(true);
     setError(null);
     try {
-      const r = await api.upload(files);
-      setRejected(r.rejected);
+      const r = await api.upload(files, overwrite);
+      setRejected((prev) => (overwrite ? [...prev, ...r.rejected] : r.rejected));
+      if (r.conflicts.length) setReplacing(files.filter((f) => r.conflicts.includes(f.name)));
       if (r.ingest) setIngest(r.ingest);
       await refresh();
     } catch (e) {
@@ -172,7 +175,7 @@ export function DocumentsPage({ health, onIndexChanged }: { health: Health | nul
 
           {tab === "files" ? (
             <div className="mt-4 space-y-4">
-              <DropZone onFiles={upload} busy={uploading} />
+              <DropZone onFiles={(files) => upload(files)} busy={uploading} />
               {rejected.length > 0 && (
                 <Alert tone="error">
                   Not uploaded: {rejected.map((r) => `${r.name} (${r.reason})`).join("; ")}
@@ -187,6 +190,7 @@ export function DocumentsPage({ health, onIndexChanged }: { health: Health | nul
       </div>
 
       {confirm && <ConfirmTranscribe row={confirm} onCancel={() => setConfirm(null)} onConfirm={() => transcribe(confirm)} />}
+      {replacing && <ConfirmReplace files={replacing} onCancel={() => setReplacing(null)} onConfirm={() => upload(replacing, true)} />}
 
       {viewing && (
         <>
@@ -618,6 +622,34 @@ function ConfirmTranscribe({ row, onCancel, onConfirm }: { row: DocumentRow; onC
         <div className="mt-5 flex justify-end gap-2">
           <button onClick={onCancel} className={btnSecondary}>Cancel</button>
           <button ref={confirmRef} onClick={onConfirm} className={btnPrimary}>{Icon.scan()} Transcribe</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ConfirmReplace({ files, onCancel, onConfirm }: { files: File[]; onCancel: () => void; onConfirm: () => void }) {
+  const confirmRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    confirmRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onCancel(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onCancel]);
+
+  const names = files.map((f) => f.name).join(", ");
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4" onClick={onCancel}>
+      <div role="dialog" aria-modal="true" aria-labelledby="replace-title" onClick={(e) => e.stopPropagation()}
+        className="w-full max-w-md rounded-xl border border-zinc-200 bg-white p-5 shadow-xl dark:border-zinc-800 dark:bg-zinc-900">
+        <h3 id="replace-title" className="break-words text-base font-semibold">Replace {names}?</h3>
+        <p className="mt-2 text-sm text-zinc-600 dark:text-zinc-400">
+          {files.length === 1 ? "A document with this name already exists." : "Documents with these names already exist."}{" "}
+          Replacing overwrites the current file{files.length === 1 ? "" : "s"} and re-indexes the new version.
+        </p>
+        <div className="mt-5 flex justify-end gap-2">
+          <button onClick={onCancel} className={btnSecondary}>Keep existing</button>
+          <button ref={confirmRef} onClick={onConfirm} className={btnPrimary}>Replace</button>
         </div>
       </div>
     </div>

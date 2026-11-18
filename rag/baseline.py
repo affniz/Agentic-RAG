@@ -12,7 +12,8 @@ from typing import Any
 
 import anthropic
 
-from .agent import ANSWER_RULES, MODEL, Answer, Usage, system_prompt
+from .agent import ANSWER_RULES, MODEL, Answer, Usage, _served_by, system_prompt
+from .models import request_options
 from .store import KnowledgeBase
 
 BASELINE_INSTRUCTIONS = """\
@@ -47,13 +48,12 @@ class NaiveRag:
             system=self.system,
             messages=messages,
             output_config={"effort": self.effort},
-            betas=["server-side-fallback-2026-07-01"],
-            fallbacks="default",
+            **request_options(self.model),  # refusal fallback where the model has one
         ) as stream:
             response = stream.get_final_message()
 
         usage = Usage()
-        usage.add(response.usage)
+        usage.add(response.usage, _served_by(response, self.model))
         if response.stop_reason == "refusal":
             text, stop = "(The model declined to answer this request.)", "refusal"
         else:
@@ -62,7 +62,7 @@ class NaiveRag:
         return Answer(
             text=text,
             usage=usage,
-            cost_usd=usage.cost(self.model),
+            cost_usd=usage.cost_usd,
             tool_calls=[],
             stop=stop,
             retrieved=[f"{c.source}#{c.index}" for c, _ in hits],

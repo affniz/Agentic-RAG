@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import bisect
 import hashlib
 import json
 import re
@@ -20,7 +21,7 @@ from rank_bm25 import BM25Plus
 
 SUPPORTED = {".md", ".txt", ".pdf"}
 COLLECTION = "docs"
-INDEX_VERSION = 3  # bump when the chunk format changes; forces a full rebuild
+INDEX_VERSION = 4  # bump when the chunk format changes; forces a full rebuild
 RERANK_MODEL = "Xenova/ms-marco-MiniLM-L-6-v2"
 SEARCH_MODES = ("hybrid", "bm25", "vector")
 
@@ -111,23 +112,83 @@ def _sections(text: str, markdown: bool) -> list[tuple[str, str]]:
     return out
 
 
-def _chunk(text: str, size: int = 800, overlap: int = 150) -> list[str]:
-    """Split on paragraphs, packing them into chunks of at most `size` chars with overlap."""
+# Where a paragraph that is too long gets split, best first: line breaks (keeps table rows and
+# list items whole), sentence ends, then spaces. Capturing groups keep each separator.
+_SPLITS = (r"(\n)", r"((?<=[.!?])\s+)", r"(\s+)")
+
+
+def _units(text: str, size: int, level: int = 0) -> list[str]:
+    """Split `text` into units of at most `size` chars (plus a trailing separator), splitting
+    only as finely as needed. Only a single word longer than `size` is cut."""
+    if len(text) <= size:
+        return [text]
+    if level == len(_SPLITS):
+        return [text[i : i + size] for i in range(0, len(text), size)]
+    parts = re.split(_SPLITS[level], text)
+    out: list[str] = []
+    for body, sep in zip(parts[::2], parts[1::2] + [""]):
+        sub = _units(body, size, level + 1) if body else [""]
+        sub[-1] += sep
+        out += [u for u in sub if u]
+    return out
+
+
+def _split_long(p: str, size: int, overlap: int) -> list[str]:
+    """Split one over-long paragraph into pieces of at most `size` chars at natural boundaries.
+    Each piece after the first starts with the previous piece's last whole units (at most
+    `overlap` chars), so a fact that straddles the split is still seen in one piece."""
+    def text(us: list[str]) -> str:
+        return "".join(us).strip()
+
     pieces: list[str] = []
+    cur: list[str] = []
+    for u in _units(p, size):
+        if cur and len(text(cur + [u])) > size:
+            pieces.append(text(cur))
+            tail: list[str] = []
+            for prev in reversed(cur):
+                if len(text([prev] + tail)) > overlap:
+                    break
+                tail.insert(0, prev)
+            cur = tail if len(text(tail + [u])) <= size else []
+        cur.append(u)
+    if text(cur):
+        pieces.append(text(cur))
+    return pieces
+
+
+def _tail(text: str, overlap: int) -> str:
+    """The last `overlap` chars of `text` or fewer, starting at the best boundary inside that
+    window: a line break, else a sentence end, else a space. Empty if there is none."""
+    if len(text) <= overlap:
+        return text
+    t = text[-overlap:]
+    if text[-overlap - 1] == "\n":
+        return t.lstrip()
+    for sep in _SPLITS:
+        parts = re.split(sep, t, maxsplit=1)
+        if len(parts) == 3:  # (partial unit, separator, rest)
+            return parts[2].lstrip()
+    return ""
+
+
+def _chunk(text: str, size: int = 800, overlap: int = 150) -> list[str]:
+    """Split on paragraphs, packing them into chunks of at most `size` chars with overlap.
+    Words are never cut, except a single word longer than `size`."""
+    pieces: list[tuple[str, bool]] = []  # (text, already starts with the previous piece's overlap)
     for p in (p.strip() for p in re.split(r"\n\s*\n", text)):
-        while len(p) > size:
-            pieces.append(p[:size])
-            p = p[size - overlap :]
-        if p:
-            pieces.append(p)
+        if len(p) > size:
+            pieces += [(piece, i > 0) for i, piece in enumerate(_split_long(p, size, overlap))]
+        elif p:
+            pieces.append((p, False))
 
     chunks: list[str] = []
     cur = ""
-    for p in pieces:
+    for p, overlapped in pieces:
         if cur and len(cur) + 2 + len(p) > size:
             chunks.append(cur)
-            tail = cur[-overlap:]
-            cur = f"{tail}\n\n{p}" if len(tail) + 2 + len(p) <= size else p
+            tail = "" if overlapped else _tail(cur, overlap)
+            cur = f"{tail}\n\n{p}" if tail and len(tail) + 2 + len(p) <= size else p
         else:
             cur = f"{cur}\n\n{p}" if cur else p
     if cur:
@@ -224,13 +285,19 @@ class _Index:
     by_id: dict[str, Chunk]
     tokens: list[set[str]]
     bm25: BM25Plus | None
+    by_source: dict[str, list[Chunk]]  # each document's chunks, in index order
 
     @classmethod
     def build(cls, chunks: list[Chunk]) -> "_Index":
         tokenized = [_tokenize(c.indexed_text) for c in chunks]
+        by_source: dict[str, list[Chunk]] = {}
+        for c in chunks:
+            by_source.setdefault(c.source, []).append(c)
+        for lst in by_source.values():
+            lst.sort(key=lambda c: c.index)
         # BM25Plus keeps IDF positive; BM25Okapi zeroes it out on tiny corpora.
         return cls(chunks, {c.id: c for c in chunks}, [set(t) for t in tokenized],
-                   BM25Plus(tokenized) if chunks else None)
+                   BM25Plus(tokenized) if chunks else None, by_source)
 
 
 ProgressFn = Callable[[str, int, int], None]  # (stage, done, total)
@@ -493,10 +560,12 @@ class KnowledgeBase:
         return candidates[:k]
 
     def get_chunks(self, source: str, start: int, end: int) -> list[Chunk]:
-        return [c for c in self.chunks if c.source == source and start <= c.index <= end]
+        """Chunks `start`..`end` (inclusive) of one document."""
+        lst = self._index.by_source.get(source, [])
+        lo = bisect.bisect_left(lst, start, key=lambda c: c.index)
+        hi = bisect.bisect_right(lst, end, key=lambda c: c.index)
+        return lst[lo:hi]
 
     def sources(self) -> dict[str, int]:
-        out: dict[str, int] = {}
-        for c in self.chunks:
-            out[c.source] = out.get(c.source, 0) + 1
-        return out
+        """{document: number of chunks}."""
+        return {source: len(lst) for source, lst in self._index.by_source.items()}

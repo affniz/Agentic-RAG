@@ -4,21 +4,24 @@
     RAG_FAKE_LLM=1 python -m uvicorn server.app:app    # demo mode: no API key, no cost
     Settings: RAG_DOCS (documents folder, default ./docs), RAG_INDEX, RAG_RERANK=0,
               RAG_OCR=1 (transcribe scanned PDFs with Claude automatically),
-              RAG_DATA (settings + feedback, default ./.rag_data), RAG_EVALS (eval sets, default ./evals)
+              RAG_DATA (settings, feedback, conversations; default ./.rag_data), RAG_EVALS (eval sets, default ./evals),
+              RAG_ALLOWED_HOSTS (extra hostnames the API answers to, comma-separated; see server/security.py)
 
-Chat responses stream as Server-Sent Events. Conversations live in memory for now; they are
-lost when the server restarts. Settings and 👍/👎 feedback are saved in RAG_DATA.
+Chat responses stream as Server-Sent Events. Settings, 👍/👎 feedback and conversations are saved in
+RAG_DATA, so chats survive a restart. Run a single uvicorn worker per RAG_DATA folder.
+Only requests addressed to localhost are answered (server/security.py).
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import threading
 import time
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any, AsyncIterator, Literal
 
@@ -30,8 +33,10 @@ from pydantic import BaseModel, Field
 from rag.agent import MODEL, PRICES, RagAgent, Usage
 from rag.store import KnowledgeBase
 from server import evals
+from server.conversations import ConversationStore
 from server.documents import make_router
 from server.feedback import FeedbackStore, Settings, SettingsStore, export_eval_set
+from server.security import LocalhostGuard
 
 ROOT = Path(__file__).resolve().parents[1]
 INDEX_DIR = os.environ.get("RAG_INDEX", str(ROOT / ".rag_index"))
@@ -43,7 +48,12 @@ DOCS_DIR = Path(os.environ.get("RAG_DOCS", str(ROOT / "docs")))
 DATA_DIR = Path(os.environ.get("RAG_DATA", str(ROOT / ".rag_data")))
 EVALS_DIR = Path(os.environ.get("RAG_EVALS", str(ROOT / "evals")))
 
+log = logging.getLogger(__name__)
+
 app = FastAPI(title="Agentic RAG")
+app.add_middleware(LocalhostGuard)
+
+
 def _make_ocr() -> Any:
     if not OCR:
         return None
@@ -120,6 +130,45 @@ class Conversation:
 
 
 conversations: dict[str, Conversation] = {}
+conversation_store = ConversationStore(DATA_DIR / "conversations")
+TURN_FIELDS = {f.name for f in fields(Turn)}
+
+
+def _save(conv: Conversation) -> None:
+    """Write the conversation to disk, unless it was deleted meanwhile. Errors are logged, not raised."""
+    try:
+        with conversation_store.lock:
+            if conversations.get(conv.id) is conv:
+                conversation_store.save({
+                    "id": conv.id, "title": conv.title, "created_at": conv.created_at,
+                    "updated_at": conv.updated_at, "turns": [asdict(t) for t in conv.turns],
+                    "model": conv.agent.model, "effort": conv.agent.effort, "messages": conv.agent.messages,
+                })
+    except Exception:
+        log.exception("could not save conversation %s", conv.id)
+
+
+def _forget(cid: str) -> None:
+    with conversation_store.lock:
+        conversations.pop(cid, None)
+        conversation_store.delete(cid)
+
+
+def _restore(data: dict[str, Any]) -> Conversation:
+    agent = RagAgent(kb, model=data.get("model") or MODEL, effort=data.get("effort") or "medium", client=client)
+    agent.messages = list(data.get("messages") or [])
+    turns = [Turn(**{k: v for k, v in t.items() if k in TURN_FIELDS}) for t in data.get("turns") or []]
+    now = time.time()
+    return Conversation(data["id"], agent, title=data.get("title") or "New chat",
+                        created_at=data.get("created_at") or now, updated_at=data.get("updated_at") or now,
+                        turns=turns)
+
+
+for _data in conversation_store.load_all():
+    try:
+        conversations[_data["id"]] = _restore(_data)
+    except Exception as e:  # a file from an older version or edited by hand
+        log.warning("skipping conversation %s: %s", _data.get("id"), e)
 
 
 def _get(cid: str) -> Conversation:
@@ -185,7 +234,7 @@ def get_conversation(cid: str) -> dict[str, Any]:
 @app.delete("/api/conversations/{cid}")
 def delete_conversation(cid: str) -> dict[str, bool]:
     _get(cid)
-    del conversations[cid]
+    _forget(cid)
     return {"ok": True}
 
 
@@ -194,7 +243,7 @@ def reset_conversations() -> dict[str, int]:
     """Clear every conversation (feedback already given is kept)."""
     busy = [c for c in conversations.values() if c.lock.locked()]
     for cid in [cid for cid, c in conversations.items() if c not in busy]:
-        del conversations[cid]
+        _forget(cid)
     return {"kept_busy": len(busy)}
 
 
@@ -209,14 +258,22 @@ def put_feedback(turn_id: str, req: FeedbackRequest) -> dict[str, Any]:
     if req.rating is None:
         turn.feedback = None
         feedback_store.set(turn_id, None)
+        _save_if_idle(conv)
         return {"feedback": None}
     turn.feedback = {"rating": req.rating, "comment": req.comment}
+    _save_if_idle(conv)
     feedback_store.set(turn_id, {
         "turn_id": turn_id, "conversation_id": conv.id, "rating": req.rating, "comment": req.comment,
         "question": question.text if question else "", "answer": turn.text, "citations": turn.citations,
         "model": turn.model, "followup": pos > 1, "cost_usd": turn.cost_usd,
     })
     return {"feedback": turn.feedback}
+
+
+def _save_if_idle(conv: Conversation) -> None:
+    # A busy conversation is saved when its turn ends; saving now would store a half-finished turn.
+    if not conv.lock.locked():
+        _save(conv)
 
 
 @app.get("/api/feedback")
@@ -312,6 +369,7 @@ async def _run(conv: Conversation, question: str) -> AsyncIterator[str]:
             turn.seconds = round(time.time() - start, 2)
             conv.turns.append(turn)
             conv.updated_at = time.time()
+            _save(conv)
             conv.lock.release()
             emit(None)
 

@@ -95,3 +95,50 @@ def test_demo_client_runs_end_to_end(kb):
 
 def NS_end(t):
     return message("end_turn", [text_block(t)], usage())
+
+
+def test_requests_carry_context_editing_and_fallback_only_where_supported(kb):
+    from rag.agent import CONTEXT_EDITING_BETA, CONTEXT_MANAGEMENT
+    from rag.models import FALLBACK_BETA
+
+    for model, has_fallback in (("claude-haiku-5-5", False), ("claude-sonnet-5-5", True), ("claude-opus-5-5", True)):
+        client = FakeClient([NS_end("ok")])
+        RagAgent(kb, client=client, model=model).ask("q")
+        req = client.requests[0]
+        assert req["context_management"] == CONTEXT_MANAGEMENT
+        assert CONTEXT_EDITING_BETA in req["betas"]
+        assert (FALLBACK_BETA in req["betas"]) is has_fallback
+        assert ("fallbacks" in req) is has_fallback
+
+
+def test_baseline_sends_no_fallback_for_haiku(kb):
+    from rag.baseline import NaiveRag
+
+    client = FakeClient([NS_end("ok")])
+    NaiveRag(kb, client=client, model="claude-haiku-5-5").ask("q")
+    assert "fallbacks" not in client.requests[0] and "betas" not in client.requests[0]
+
+
+def test_haiku_long_prompt_is_priced_at_the_higher_tier():
+    from rag.agent import Usage
+    from rag.models import call_cost
+
+    assert call_cost("claude-haiku-5-5", 100_000, 1_000) == pytest.approx((100_000 * 0.10 + 1_000 * 0.50) / 1e6)
+    # Above 100K prompt tokens (cache reads count toward the prompt) every token costs the long rate.
+    assert call_cost("claude-haiku-5-5", 1_000, 1_000, cache_read=100_000) == pytest.approx(
+        (1_000 * 0.50 + 1_000 * 2.50 + 100_000 * 0.05) / 1e6)
+    assert call_cost("unknown-model", 1, 1) is None
+
+    u = Usage()
+    u.add(usage(1_000, 100), "claude-haiku-5-5")
+    u.add(usage(200_000, 100), "claude-haiku-5-5")  # each call picks its own tier
+    assert u.cost_usd == pytest.approx((1_000 * 0.10 + 100 * 0.50 + 200_000 * 0.50 + 100 * 2.50) / 1e6)
+    u.add(usage(1, 1), "unknown-model")
+    assert u.cost_usd is None and u.api_calls == 3
+
+
+def test_cost_uses_the_model_that_served_the_response(kb):
+    msg = message("end_turn", [text_block("ok")], usage(100, 50))
+    msg.model = "claude-opus-5-5"  # e.g. a refusal fallback answered instead
+    ans = RagAgent(kb, client=FakeClient([msg]), model="claude-sonnet-5-5").ask("q")
+    assert ans.cost_usd == pytest.approx((100 * 4 + 50 * 20) / 1e6)
