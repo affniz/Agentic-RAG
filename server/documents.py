@@ -89,7 +89,7 @@ class IngestJob:
             r = self.kb.ingest(self.docs_dir, rebuild=rebuild, on_progress=progress, force=force)
             return {"state": "done", "report": {"added": r.added, "updated": r.updated, "removed": r.removed,
                                                 "unchanged": r.unchanged, "chunks": r.chunks, "empty": r.empty,
-                                                "failed": r.failed}}
+                                                "failed": r.failed, "embedded": r.embedded}}
         except Exception as e:  # surfaced in the UI
             return {"state": "error", "error": f"{type(e).__name__}: {e}"}
 
@@ -157,8 +157,8 @@ def make_router(kb: KnowledgeBase, docs_dir: Path, transcriber: Callable[[], Tra
             status = "new" if rel not in indexed else ("indexed" if indexed[rel] == digest else "changed")
             if status == "indexed" and not counts.get(rel):
                 status = "empty"  # indexed, but no text could be extracted
-            if status == "new" and rel in errors:
-                status = "error"  # the last ingest tried and couldn't read it
+            if rel in errors:
+                status = "error"  # the last ingest tried and couldn't read it (a previous version may still be indexed)
             rows.append({"name": rel, "type": path.suffix.lower().lstrip("."), "size": stat.st_size,
                          "modified": stat.st_mtime, "indexed_at": indexed_at.get(rel), "error": errors.get(rel) if status == "error" else None, "chunks": counts.get(rel, 0), "status": status,
                          "pages": pages, "transcribed": is_pdf and kb.has_transcription(path),

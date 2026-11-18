@@ -107,7 +107,7 @@ export type IngestState = {
   started_at?: number;
   finished_at?: number;
   error?: string;
-  report?: { added: string[]; updated: string[]; removed: string[]; unchanged: number; chunks: number; empty?: string[]; failed?: Record<string, string> };
+  report?: { added: string[]; updated: string[]; removed: string[]; unchanged: number; chunks: number; empty?: string[]; failed?: Record<string, string>; embedded?: number };
 };
 
 export type DocumentsResponse = {

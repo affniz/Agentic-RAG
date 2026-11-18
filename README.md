@@ -17,7 +17,7 @@ question ─► Claude (claude-haiku-5-5) ──tool calls──► list_documen
 
 | File | Role |
 |---|---|
-| `rag/store.py` | Loads `.md` / `.txt` / `.pdf`; heading-aware chunking (each chunk knows its Markdown section path); incremental indexing into ChromaDB (local all-MiniLM-L6-v2 ONNX embeddings) + BM25; hybrid search with Reciprocal Rank Fusion; optional local cross-encoder reranking |
+| `rag/store.py` | Loads `.md` / `.txt` / `.pdf`; heading-aware chunking (each chunk knows its Markdown section path); incremental per-chunk indexing (content-hashed chunk ids, so an edit only re-embeds the chunks it changed) into ChromaDB (local all-MiniLM-L6-v2 ONNX embeddings) + BM25; hybrid search with Reciprocal Rank Fusion; optional local cross-encoder reranking |
 | `rag/agent.py` | The agent loop: strict tool schemas, parallel tool execution, multi-turn memory, step limit, refusal / `max_tokens` handling, event callbacks, per-question cost tracking |
 | `rag/evaluate.py` | Retrieval metrics, and answer grading that compares the agent with the one-shot baseline per question category |
 | `rag/baseline.py` | One-shot RAG baseline (retrieve once, answer once) for comparison |
@@ -34,7 +34,7 @@ question ─► Claude (claude-haiku-5-5) ──tool calls──► list_documen
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt     # or: pip install -r requirements.lock  (exact versions, as tested in CI)
+pip install -r requirements.txt     # or: pip install -r requirements.lock  (exact versions of a known-good setup, Python 3.14)
 export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
@@ -45,7 +45,7 @@ downloaded, search keeps working without it (or pass `--no-rerank`).
 ## Usage
 
 ```bash
-python main.py ingest docs                 # sync the index; only new/changed files are re-embedded
+python main.py ingest docs                 # sync the index; only new or edited chunks are re-embedded
 python main.py ingest docs --rebuild       # re-embed everything
 python main.py search "carry over"         # test retrieval alone, no API call (--mode bm25|vector|hybrid)
 python main.py ask "How many vacation days do I get after 6 years, and how many can I carry over?"
@@ -104,6 +104,32 @@ models without touching chat. Each run records the settings it used.
 - Conversations, settings and feedback are saved in `RAG_DATA` (`conversations/<id>.json`), so chats survive a restart. Run a single uvicorn worker per `RAG_DATA` folder, or the processes overwrite each other's files.
 - **Local only:** the server answers only requests addressed to `localhost` / `127.0.0.1` / `[::1]` / `*.localhost`, and refuses writes from other sites (cross-site `Origin` or `Sec-Fetch-Site`), so a web page you visit can't upload, delete or start paid evals. There is no login: don't expose it on a network. `RAG_ALLOWED_HOSTS` adds hostnames (comma-separated). See `server/security.py`.
 - In demo mode the eval dashboard works too, with a keyword-matching stand-in judge: free, but the scores mean nothing.
+
+## Docker
+
+One image serves the web UI and the API. The embedding model (and, by default, the reranker) are
+baked in, so it starts quickly and indexes without network access.
+
+```bash
+docker build -t agentic-rag .
+docker run -p 8000:8000 -e ANTHROPIC_API_KEY -v rag-data:/data agentic-rag   # http://localhost:8000
+```
+
+- **Demo mode** (no API key, real search, fake model): `docker run -p 8000:8000 -e RAG_FAKE_LLM=1 agentic-rag`.
+- **Your documents:** mount them over the samples with `-v /path/to/docs:/app/docs`, then click **Re-index** on the Documents screen.
+- **What persists:** the index, settings, feedback and chat conversations live in the `/data` volume. Eval results are written inside the container.
+- **Build without the reranker** (e.g. where Hugging Face is unreachable): `--build-arg BAKE_RERANKER=0`; it is then downloaded on first use, and search works without it if that fails.
+- **Other hostnames:** the server only answers requests addressed to localhost (see *Local only* above). To open it under another name, e.g. on a home server, add `-e RAG_ALLOWED_HOSTS=myhost` - there is still no login.
+- `scripts/docker_smoke_test.sh [image]` checks a built image end to end in demo mode.
+
+## CI
+
+`.github/workflows/ci.yml` runs on every pull request and push to `main`:
+
+1. **Python tests:** `pytest`; no API key needed.
+2. **Frontend:** type-check and production build.
+3. **Docker image:** builds the image and runs the smoke test. On pushes to `main` it also publishes
+   `ghcr.io/<owner>/<repo>:latest` and `:sha-<commit>` to the GitHub Container Registry.
 
 ## Evaluation
 

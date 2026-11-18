@@ -242,7 +242,7 @@ function IngestBanner({ ingest }: { ingest: IngestState }) {
     if (failed.length) {
       return (
         <Alert tone="error">
-          {failed.length === 1 ? "1 file was" : `${failed.length} files were`} skipped; the rest is indexed{parts.length ? ` (${parts.join(", ")})` : ""}.
+          {failed.length === 1 ? "1 file was" : `${failed.length} files were`} skipped; the rest is indexed{parts.length ? ` (${parts.join(", ")})` : ""}. A skipped file that was indexed before stays searchable in its previous version.
           <ul className="mt-1 list-disc pl-5">
             {failed.map(([name, reason]) => <li key={name}><span className="font-medium">{name}</span>: {reason}</li>)}
           </ul>
@@ -251,7 +251,7 @@ function IngestBanner({ ingest }: { ingest: IngestState }) {
     }
     return (
       <div className="mt-4 flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-300" role="status">
-        {Icon.check()} Index up to date{parts.length ? `: ${parts.join(", ")}` : " - nothing changed"}. {r.chunks} chunks.
+        {Icon.check()} Index up to date{parts.length ? `: ${parts.join(", ")}` : " - nothing changed"}. {r.chunks} chunks{r.embedded ? ` (${r.embedded} newly embedded)` : ""}.
       </div>
     );
   }

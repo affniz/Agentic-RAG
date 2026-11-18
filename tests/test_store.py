@@ -344,3 +344,109 @@ def test_get_chunks_and_sources_use_the_per_document_index(tmp_path):
     assert [c.index for c in kb.get_chunks("a.md", 3, 99)] == [3, 4]
     assert kb.get_chunks("a.md", 4, 2) == [] and kb.get_chunks("nope.md", 0, 5) == []
     assert all(c.source == "a.md" for c in kb.get_chunks("a.md", 0, 4))
+
+
+# ---------------------------------------------------------------- incremental, per-chunk updates
+
+
+def _sectioned(n: int, edit: str = "") -> str:
+    parts = ["# Leave Policy\nApplies to all employees."]
+    for i in range(n):
+        parts.append(f"## Section {i}\n" + f"Rule {i}: " + "standard wording " * 20 + (edit if i == 3 else ""))
+    return "\n\n".join(parts)
+
+
+def test_chunk_ids_follow_content_not_position():
+    a = chunk_document("p.md", _sectioned(6), markdown=True)
+    # Insert a new section at the top: every later chunk shifts index but keeps its id.
+    b = chunk_document("p.md", "# Leave Policy\nApplies to all employees.\n\n## New\nBrand new rule.\n\n"
+                       + _sectioned(6).split("\n\n", 1)[1], markdown=True)
+    assert [c.index for c in b if c.id in {x.id for x in a}] != [c.index for c in a]
+    assert len({c.id for c in b} - {c.id for c in a}) == 1
+    # Same text in two places, or in two documents, still gets distinct ids.
+    dup = chunk_document("d.md", "# T\n## A\nsame\n## B\nx\n## A\nsame", markdown=True)
+    assert len({c.id for c in dup}) == len(dup)
+    assert chunk_document("x.md", "same", False)[0].id != chunk_document("y.md", "same", False)[0].id
+
+
+def test_update_embeds_only_changed_chunks(tmp_path):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "leave_policy.md").write_text(_sectioned(8))
+    kb = KnowledgeBase(tmp_path / "idx", rerank=False)
+    r = kb.ingest(docs)
+    total = len(kb.chunks)
+    assert r.embedded == total > 5
+
+    (docs / "leave_policy.md").write_text(_sectioned(8, edit=" Carry-over is now 10 days."))
+    r = kb.ingest(docs)
+    assert r.updated == ["leave_policy.md"] and r.embedded == 1
+    assert "10 days" in kb.search("carry-over days", k=1, mode="vector")[0][0].text
+    # The old version of the edited chunk is gone from the vector store; nothing else is left over.
+    assert sorted(kb._col.get(include=[])["ids"]) == sorted(c.id for c in kb.chunks)
+
+    r = kb.ingest(docs)
+    assert r.embedded == 0 and r.unchanged == 1
+
+    (docs / "leave_policy.md").unlink()
+    kb.ingest(docs)
+    assert kb._col.get(include=[])["ids"] == [] and kb.chunks == []
+
+
+def test_failed_update_keeps_previous_version_and_retries(tmp_path, monkeypatch):
+    import rag.store as store
+
+    docs = make_docs(tmp_path)
+    kb = KnowledgeBase(tmp_path / "idx", rerank=False)
+    kb.ingest(docs)
+    old_hash = kb.indexed_files()["travel.txt"]
+
+    (docs / "travel.txt").write_text("Hotel cap is $400 per night in London.")
+    real_read = store._read
+    monkeypatch.setattr(store, "_read", lambda p: (_ for _ in ()).throw(OSError("disk error"))
+                        if p.name == "travel.txt" else real_read(p))
+    r = kb.ingest(docs)
+    assert set(r.failed) == {"travel.txt"} and r.updated == []
+    # The previous version is still fully searchable, by keywords and by vectors.
+    assert "$350" in kb.search("london hotel", k=1, mode="bm25")[0][0].text
+    assert "$350" in kb.search("london hotel", k=1, mode="vector")[0][0].text
+    assert kb.indexed_files()["travel.txt"] == old_hash  # still differs from disk -> retried
+    assert set(kb.ingest(docs).failed) == {"travel.txt"}
+
+    monkeypatch.setattr(store, "_read", real_read)
+    r = kb.ingest(docs)
+    assert r.failed == {} and r.updated == ["travel.txt"]
+    assert "$400" in kb.search("london hotel", k=1)[0][0].text
+    assert len(kb.get_chunks("travel.txt", 0, 99)) == 1
+
+
+def test_vector_search_has_no_gap_while_a_file_is_updated(tmp_path):
+    docs = make_docs(tmp_path)
+    kb = KnowledgeBase(tmp_path / "idx", rerank=False)
+    kb.ingest(docs)
+    (docs / "travel.txt").write_text("Hotel cap is $400 per night in London.")
+    seen = []
+
+    def progress(stage, done, total):  # runs mid-ingest: while reading, and after the new vectors are added
+        if stage == "reading" or (stage == "embedding" and done == total):
+            hits = kb.search("london hotel", k=1, mode="vector", source="travel.txt")
+            seen.append(hits[0][0].text if hits else None)
+
+    kb.ingest(docs, on_progress=progress)
+    assert len(seen) == 2 and all(t and "$350" in t for t in seen)  # old version served until the swap
+    assert "$400" in kb.search("london hotel", k=1, mode="vector")[0][0].text
+
+
+def test_vectors_left_by_an_interrupted_ingest_are_reused_or_cleaned(tmp_path):
+    docs = make_docs(tmp_path)
+    kb = KnowledgeBase(tmp_path / "idx", rerank=False)
+    kb.ingest(docs)
+    (docs / "travel.txt").write_text("Hotel cap is $400 per night in London.")
+    new_id = chunk_document("travel.txt", (docs / "travel.txt").read_text(), False)[0].id
+    # Simulate a crash after embedding but before the swap, plus a stray vector.
+    kb._col.add(ids=[new_id, "stray"], documents=["Hotel cap is $400 per night in London.", "junk"],
+                metadatas=[{"source": "travel.txt"}, {"source": "gone.txt"}])
+
+    r = KnowledgeBase(tmp_path / "idx", rerank=False).ingest(docs)
+    assert r.embedded == 0  # the vector from the interrupted run is reused
+    assert sorted(kb._col.get(include=[])["ids"]) == sorted(c.id for c in KnowledgeBase(tmp_path / "idx", rerank=False).chunks)

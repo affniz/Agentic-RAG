@@ -80,7 +80,7 @@ def main() -> None:
     if args.cmd == "ingest":
         r = kb.ingest(args.docs_dir, rebuild=args.rebuild)
         print(f"Index: {r.chunks} chunks from {len(kb.sources())} documents "
-              f"(added {len(r.added)}, updated {len(r.updated)}, removed {len(r.removed)}, unchanged {r.unchanged}).")
+              f"(added {len(r.added)}, updated {len(r.updated)}, removed {len(r.removed)}, unchanged {r.unchanged}; {r.embedded} chunks embedded).")
         for name, reason in r.failed.items():
             print(f"Skipped {name}: {reason}")
         for name in r.empty:
