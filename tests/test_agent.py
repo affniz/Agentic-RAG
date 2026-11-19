@@ -142,3 +142,32 @@ def test_cost_uses_the_model_that_served_the_response(kb):
     msg.model = "claude-opus-5-5"  # e.g. a refusal fallback answered instead
     ans = RagAgent(kb, client=FakeClient([msg]), model="claude-sonnet-5-5").ask("q")
     assert ans.cost_usd == pytest.approx((100 * 4 + 50 * 20) / 1e6)
+
+
+def test_cut_off_tool_call_is_closed_before_the_next_question(kb):
+    # A response cut off at max_tokens can end in a tool_use that never ran. The API rejects any
+    # request with an unanswered tool_use, so without a fix every later question would fail.
+    client = FakeClient([
+        message(stop_reason="max_tokens", usage=usage(100, 50),
+                content=[text("Let me check."), tool("t1", "search_knowledge_base", query="carry")]),
+        message(stop_reason="end_turn", usage=usage(100, 50), content=[text("a2")]),
+    ])
+    agent = RagAgent(kb, client=client)
+    assert agent.ask("q1").stop == "max_tokens"
+    assert agent.ask("q2").text == "a2"
+    sent = client.requests[1]["messages"]
+    assert [m["role"] for m in sent] == ["user", "assistant", "user", "user"]
+    assert sent[2]["content"][0]["tool_use_id"] == "t1" and sent[2]["content"][0]["is_error"] is True
+    assert sent[3]["content"] == "q2"
+
+
+def test_saved_history_with_an_open_tool_call_is_repaired(kb):
+    # Conversations restored from disk hold plain dicts, and may have been saved in the broken state.
+    client = FakeClient([message(stop_reason="end_turn", usage=usage(100, 50), content=[text("ok")])])
+    agent = RagAgent(kb, client=client)
+    agent.messages = [
+        {"role": "user", "content": "q1"},
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "t9", "name": "list_documents", "input": {}}]},
+    ]
+    agent.ask("q2")
+    assert client.requests[0]["messages"][2]["content"][0]["tool_use_id"] == "t9"

@@ -284,6 +284,7 @@ class RagAgent:
             return f"Tool error: {type(e).__name__}: {e}", True
 
     def ask(self, question: str) -> Answer:
+        self._close_pending_tool_calls()
         self.messages.append({"role": "user", "content": question})
         usage = Usage()
         calls: list[dict[str, Any]] = []
@@ -334,6 +335,23 @@ class RagAgent:
         self.messages.append({"role": "assistant", "content": response.content})
         return finish(_text(response) or "(no text in response)", "step_limit")
 
+    def _close_pending_tool_calls(self) -> None:
+        """Answer tool calls the history left open, so the next request is valid.
+
+        A response that stops at max_tokens or with a refusal can end in a tool_use block that was
+        never run. The API rejects any later request whose tool_use has no tool_result, which would
+        break every following question in the chat (and conversations saved in that state).
+        """
+        if not self.messages or self.messages[-1]["role"] != "assistant":
+            return
+        pending = [_field(b, "id") for b in _blocks(self.messages[-1]["content"]) if _field(b, "type") == "tool_use"]
+        if pending:
+            self.messages.append({"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": tid, "is_error": True,
+                 "content": "Not run: the response was cut off before this tool call completed."}
+                for tid in pending
+            ]})
+
     def _citations(self, text: str) -> list[dict[str, Any]]:
         """Resolve [source#n] markers in the answer to the chunks they point at."""
         out, seen = [], set()
@@ -353,6 +371,15 @@ class RagAgent:
 
 def _text(response: Any) -> str:
     return "".join(b.text for b in response.content if b.type == "text").strip()
+
+
+def _blocks(content: Any) -> list[Any]:
+    return content if isinstance(content, list) else []
+
+
+def _field(block: Any, name: str) -> Any:
+    """A content block's field: SDK objects use attributes, history restored from disk uses dicts."""
+    return block.get(name) if isinstance(block, dict) else getattr(block, name, None)
 
 
 def _served_by(response: Any, requested: str) -> str:

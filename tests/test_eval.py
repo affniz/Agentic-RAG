@@ -153,3 +153,54 @@ def test_judge_defaults_to_sonnet_and_flags_self_grading(kb, tmp_path):
                     client=RecordingJudge(), log=logs.append)
     assert s["judge_same_as_answer"] is True and "fallbacks" not in calls[-1]
     assert any("grades its own answers" in line for line in logs)
+
+
+def _flaky(fail_on: str, exc: Exception) -> FakeAnthropic:
+    """The demo client, but any answering request mentioning `fail_on` raises `exc`."""
+    client = FakeAnthropic()
+    stream = client.beta.messages.stream
+
+    def maybe_fail(**kw):
+        if fail_on in str(kw["messages"]):
+            raise exc
+        return stream(**kw)
+
+    client.beta.messages.stream = maybe_fail
+    return client
+
+
+EVAL_QS = [
+    {"id": "a", "category": "simple", "question": "Bangalore tier office", "evidence": ["Tier 3 office"],
+     "sources": ["offices.md"], "reference": "Tier 3"},
+    {"id": "b", "category": "unanswerable", "question": "salary?", "evidence": [], "sources": [],
+     "reference": "unknown"},
+]
+
+
+def test_a_failed_question_is_recorded_and_the_run_goes_on(kb, tmp_path):
+    import json
+    from pathlib import Path
+
+    s = answer_eval(kb, EVAL_QS, model="claude-haiku-5-5", systems=("agentic",), out_dir=tmp_path, repeats=2,
+                    client=_flaky("salary", RuntimeError("overloaded")), log=lambda _: None)
+    r = s["systems"]["agentic"]
+    assert r["errors"] == 2  # question b, in both runs
+    assert r["correct"] == 1.0 and r["range"]["correct"] == (1.0, 1.0)  # errors are left out, not graded
+    assert r["by_category"] == {"simple": {"n": 1, "correct": 1.0, "range": (1.0, 1.0)}}
+    assert r["unstable"] == []
+    rows = json.loads(Path(s["results_file"]).read_text())["rows"]
+    bad = [x for x in rows if x["id"] == "b"]
+    assert len(bad) == 2 and all(x["verdict"] == "error" and "overloaded" in x["error"] for x in bad)
+
+
+def test_an_invalid_api_key_stops_the_eval(kb, tmp_path):
+    import anthropic
+    import httpx
+
+    err = anthropic.AuthenticationError(
+        "invalid x-api-key", response=httpx.Response(401, request=httpx.Request("POST", "https://api.anthropic.com")),
+        body=None)
+    with pytest.raises(anthropic.AuthenticationError):
+        answer_eval(kb, EVAL_QS, model="claude-haiku-5-5", systems=("agentic",), out_dir=tmp_path,
+                    client=_flaky("", err), log=lambda _: None)
+    assert not list(tmp_path.glob("*.json"))

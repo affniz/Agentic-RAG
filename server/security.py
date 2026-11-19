@@ -6,6 +6,9 @@ The server has no login, so two browser attacks matter:
 - Cross-site writes: any page can POST a form or a multipart upload to localhost:8000 without a
   CORS preflight. Browsers mark those with an `Origin` header and `Sec-Fetch-Site: cross-site`.
 
+It is not network access control: a non-browser client that can reach the port can send any Host
+header. Keep the port on loopback (uvicorn's default; `-p 127.0.0.1:8000:8000` with Docker).
+
 Only hostnames are compared, never ports, so the Vite dev proxy (:5173 -> :8000) keeps working.
 RAG_ALLOWED_HOSTS adds hostnames, comma-separated (e.g. a LAN name you serve the UI under).
 """

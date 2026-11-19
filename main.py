@@ -78,7 +78,10 @@ def main() -> None:
     kb = KnowledgeBase(args.index, rerank=not args.no_rerank, pdf_ocr=ocr)
 
     if args.cmd == "ingest":
-        r = kb.ingest(args.docs_dir, rebuild=args.rebuild)
+        try:
+            r = kb.ingest(args.docs_dir, rebuild=args.rebuild)
+        except FileNotFoundError as e:
+            sys.exit(f"{e} - nothing was changed.")
         print(f"Index: {r.chunks} chunks from {len(kb.sources())} documents "
               f"(added {len(r.added)}, updated {len(r.updated)}, removed {len(r.removed)}, unchanged {r.unchanged}; {r.embedded} chunks embedded).")
         for name, reason in r.failed.items():
@@ -191,6 +194,8 @@ def run_eval(args: argparse.Namespace, model: str) -> None:
     print(f"{'avg seconds':<28}" + "".join(f"{res[n]['avg_seconds']:>{w}.1f}" for n in systems))
     cost_label = "cost per run (USD)" if s["repeats"] > 1 else "cost (USD)"
     print(f"{cost_label:<28}" + "".join(f"{'$' + format(res[n]['cost_usd'], '.3f'):>{w}}" for n in systems))
+    if any(res[n]["errors"] for n in systems):
+        print(f"{'errors (left out above)':<28}" + "".join(f"{res[n]['errors']:>{w}}" for n in systems))
     if s["repeats"] > 1:
         for n in systems:
             unstable = res[n]["unstable"]

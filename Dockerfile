@@ -1,6 +1,7 @@
 # Agentic RAG: web UI + API in one image.
 #   docker build -t agentic-rag .
-#   docker run -p 8000:8000 -e ANTHROPIC_API_KEY -v rag-data:/data agentic-rag
+#   docker run -p 127.0.0.1:8000:8000 -e ANTHROPIC_API_KEY -v rag-data:/data agentic-rag
+# Keep the 127.0.0.1: the API has no login, and the Host check doesn't stop other machines (see README).
 # Demo mode (no API key, fake model, real search): add -e RAG_FAKE_LLM=1.
 # Your own documents: -v /path/to/docs:/app/docs
 

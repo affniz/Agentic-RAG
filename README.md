@@ -102,7 +102,7 @@ models without touching chat. Each run records the settings it used.
 - **Encrypted PDFs** that open without a password (common for official documents) are read normally. A PDF that needs a password, or any file that can't be read, is skipped with the reason shown in the Documents table; the rest of the folder is still indexed.
 - Other settings: `RAG_DOCS` (documents folder, default `./docs`), `RAG_INDEX` (index directory), `RAG_RERANK=0` (turn off the reranker), `RAG_DATA` (settings, feedback and eval-set indexes, default `./.rag_data`), `RAG_EVALS` (eval sets and results, default `./evals`).
 - Conversations, settings and feedback are saved in `RAG_DATA` (`conversations/<id>.json`), so chats survive a restart. Run a single uvicorn worker per `RAG_DATA` folder, or the processes overwrite each other's files.
-- **Local only:** the server answers only requests addressed to `localhost` / `127.0.0.1` / `[::1]` / `*.localhost`, and refuses writes from other sites (cross-site `Origin` or `Sec-Fetch-Site`), so a web page you visit can't upload, delete or start paid evals. There is no login: don't expose it on a network. `RAG_ALLOWED_HOSTS` adds hostnames (comma-separated). See `server/security.py`.
+- **Local only:** the server answers only requests addressed to `localhost` / `127.0.0.1` / `[::1]` / `*.localhost`, and refuses writes from other sites (cross-site `Origin` or `Sec-Fetch-Site`), so a web page you visit can't upload, delete or start paid evals. This protects against browsers, not the network: a client that can reach the port can send any `Host` header. There is no login, so keep the port on loopback (`uvicorn` binds to 127.0.0.1 by default; for Docker see below). `RAG_ALLOWED_HOSTS` adds hostnames (comma-separated). See `server/security.py`.
 - In demo mode the eval dashboard works too, with a keyword-matching stand-in judge: free, but the scores mean nothing.
 
 ## Docker
@@ -112,14 +112,18 @@ baked in, so it starts quickly and indexes without network access.
 
 ```bash
 docker build -t agentic-rag .
-docker run -p 8000:8000 -e ANTHROPIC_API_KEY -v rag-data:/data agentic-rag   # http://localhost:8000
+docker run -p 127.0.0.1:8000:8000 -e ANTHROPIC_API_KEY -v rag-data:/data agentic-rag   # http://localhost:8000
 ```
 
-- **Demo mode** (no API key, real search, fake model): `docker run -p 8000:8000 -e RAG_FAKE_LLM=1 agentic-rag`.
+- **Keep the `127.0.0.1:` in `-p`.** Inside the container the server listens on all interfaces, so a plain `-p 8000:8000`
+  publishes it on every network interface of your machine. The Host check (see *Local only*) does not stop that:
+  any device on your network can send `Host: localhost` and use the API with your key - chat, paid evals, uploads
+  and deletes. Publish on loopback only unless you put an authenticating proxy in front.
+- **Demo mode** (no API key, real search, fake model): `docker run -p 127.0.0.1:8000:8000 -e RAG_FAKE_LLM=1 agentic-rag`.
 - **Your documents:** mount them over the samples with `-v /path/to/docs:/app/docs`, then click **Re-index** on the Documents screen.
 - **What persists:** the index, settings, feedback and chat conversations live in the `/data` volume. Eval results are written inside the container.
 - **Build without the reranker** (e.g. where Hugging Face is unreachable): `--build-arg BAKE_RERANKER=0`; it is then downloaded on first use, and search works without it if that fails.
-- **Other hostnames:** the server only answers requests addressed to localhost (see *Local only* above). To open it under another name, e.g. on a home server, add `-e RAG_ALLOWED_HOSTS=myhost` - there is still no login.
+- **Other hostnames:** the server only answers requests addressed to localhost (see *Local only* above). To open it under another name, e.g. on a home server, add `-e RAG_ALLOWED_HOSTS=myhost` - there is still no login, so anyone who can reach the port can use your API key.
 - `scripts/docker_smoke_test.sh [image]` checks a built image end to end in demo mode.
 
 ## CI
@@ -184,6 +188,8 @@ Answers are graded by a `claude-sonnet-5-5` judge against reference answers (`--
 default Haiku agent isn't graded by itself; a run whose judge is the model being evaluated prints a warning and is
 flagged in the dashboard. The results table above was graded by a Haiku judge, so compare new runs with each other,
 not with it. Other flags: `--category multi_hop`, `--limit N`, `--workers N`, and `--repeats N` - run everything N times and report the mean, the min-max range across runs and the questions whose verdict changed. On these sets one run flips about one answer, so use `--repeats 3` before trusting a difference of a question or two.
+A question that fails with an API error (a rate limit, an overload) is saved with the verdict `error` and left out of the
+accuracy numbers, which report how many there were; an invalid API key stops the run at once.
 
 Rough cost for the hard set (estimates): Haiku, both systems ≈ $0.15; Sonnet, both systems ≈ $1-2.
 

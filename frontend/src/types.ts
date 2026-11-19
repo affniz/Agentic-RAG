@@ -159,6 +159,7 @@ export type SystemSummary = {
   runs?: number;
   range?: Record<string, [number, number]>;
   unstable?: string[];
+  errors?: number; // questions that failed with an error; left out of the metrics above
 };
 
 export type RetrievalMetrics = { "recall@k": number; "hit@k": number; mrr: number; note?: string };
@@ -192,8 +193,9 @@ export type EvalRow = {
   run: number;
   question: string;
   answer: string;
-  verdict: "correct" | "partially_correct" | "incorrect";
+  verdict: "correct" | "partially_correct" | "incorrect" | "error";
   judge_reasoning: string;
+  error?: string;
   cited_expected_sources: boolean | null;
   evidence_recall: number | null;
   tool_calls: number;
