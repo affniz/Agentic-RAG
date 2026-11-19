@@ -207,3 +207,65 @@ def test_cost_cap_stops_searching_and_answers(kb):
 def test_prompt_says_documents_are_not_instructions(kb):
     agent = RagAgent(kb, client=FakeClient([]))
     assert "not instructions to you" in agent.system
+
+
+def test_tool_calls_in_one_step_run_in_parallel(kb, monkeypatch):
+    import threading
+    import time
+
+    real_search = kb.search
+    running, peak = [0], [0]
+    lock = threading.Lock()
+
+    def slow_search(query, **kw):
+        with lock:
+            running[0] += 1
+            peak[0] = max(peak[0], running[0])
+        time.sleep(0.3 if query == "slow" else 0.05)
+        with lock:
+            running[0] -= 1
+        return real_search(query, **kw)
+
+    monkeypatch.setattr(kb, "search", slow_search)
+    client = FakeClient([
+        message(stop_reason="tool_use", content=[
+            tool("t1", "search_knowledge_base", query="slow", k=1, source=None),
+            tool("t2", "search_knowledge_base", query="fast", k=1, source=None),
+            tool("t3", "read_chunks", source="vacation.md", start=0, end=0),
+        ]),
+        message(stop_reason="end_turn", content=[text("done")]),
+    ])
+    events = []
+    agent = RagAgent(kb, client=client, on_event=events.append)
+    start = time.monotonic()
+    ans = agent.ask("q")
+    assert time.monotonic() - start < 0.4 + 0.3  # not 0.3 + 0.05 run one after the other plus overhead
+    assert peak[0] == 2  # both searches were running at once
+    # Results go back in the order the model asked for them, whatever order they finished in...
+    assert [r["tool_use_id"] for r in agent.messages[2]["content"]] == ["t1", "t2", "t3"]
+    # ...while events report each call as it finishes, with its own result count and time.
+    finished = [e for e in events if e["type"] == "tool_result"]
+    assert finished[-1]["id"] == "t1" and all(e["results"] == 1 for e in finished)
+    assert next(e for e in finished if e["id"] == "t1")["seconds"] >= 0.3
+    assert ans.retrieved == ["vacation.md#0"]
+
+
+def test_every_model_call_is_timed(kb):
+    looping = [message(stop_reason="tool_use", content=[tool(f"t{i}", "list_documents")]) for i in range(2)]
+    client = FakeClient(looping + [message(stop_reason="end_turn", content=[text("best effort")])])
+    events = []
+    ans = RagAgent(kb, client=client, max_steps=2, on_event=events.append).ask("q")
+    assert [t["step"] for t in ans.timings] == [1, 2, 3]  # two steps, then the forced final answer
+    assert [t["stop_reason"] for t in ans.timings] == ["tool_use", "tool_use", "end_turn"]
+    assert all(0 <= t["wait_seconds"] <= t["seconds"] and t["retries"] is None for t in ans.timings)
+    assert [e["step"] for e in events if e["type"] == "model_call"] == [1, 2, 3]
+    assert [e["step"] for e in events if e["type"] == "tool_call"] == [1, 2]
+
+
+def test_retry_count_is_read_from_the_sdk_request_header():
+    from types import SimpleNamespace as NS
+
+    from rag.agent import _retries
+
+    stream = NS(response=NS(request=NS(headers={"x-stainless-retry-count": "2"})))
+    assert _retries(stream) == 2 and _retries(NS()) is None

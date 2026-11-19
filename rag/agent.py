@@ -5,6 +5,8 @@ from __future__ import annotations
 import datetime
 import json
 import re
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -220,6 +222,7 @@ class Answer:
     stop: str = "end_turn"  # end_turn | refusal | max_tokens | step_limit | cost_limit
     citations: list[dict[str, Any]] = field(default_factory=list)
     retrieved: list[str] = field(default_factory=list)  # chunks shown to the model, 'source#index'
+    timings: list[dict[str, Any]] = field(default_factory=list)  # one per model call, see RagAgent._create
 
 
 Event = dict[str, Any]
@@ -228,9 +231,12 @@ Event = dict[str, Any]
 class RagAgent:
     """Runs the tool loop. Pass `on_event` to observe progress (used by the CLI and the future UI).
 
-    Events: {"type": "text_delta", "text"}, {"type": "tool_call", "id", "name", "args"},
-            {"type": "tool_result", "id", "name", "is_error", "chars", "results"},
+    Events: {"type": "text_delta", "text"}, {"type": "tool_call", "id", "name", "args", "step"},
+            {"type": "tool_result", "id", "name", "is_error", "chars", "results", "seconds"},
+            {"type": "model_call", "step", "seconds", "wait_seconds", "retries", "output_tokens", "stop_reason"},
             {"type": "answer", "text", "stop", "citations"}, {"type": "usage", "usage", "cost_usd"}
+
+    The tool calls of one step run in parallel; their tool_result events arrive as each finishes.
     """
 
     def __init__(
@@ -253,7 +259,7 @@ class RagAgent:
         self.kb = kb
         self._seen: list[str] = []
         self.search = search or SearchOptions()  # mutable: changes apply to the next search
-        self.handlers = build_handlers(kb, self._seen, self.search)
+        self._timings: list[dict[str, Any]] = []
         self.system = system_prompt(instructions, today or datetime.date.today().isoformat())
         self.model = model
         self.effort = effort
@@ -263,13 +269,30 @@ class RagAgent:
         self.messages: list[dict[str, Any]] = []  # full history, kept across questions
         self.total = Usage()
 
-    def _create(self, **extra: Any) -> Any:
-        """One model call, streamed: text deltas go out as events, the full message is returned."""
+    def _create(self, step: int, **extra: Any) -> Any:
+        """One model call, streamed: text deltas go out as events, the full message is returned.
+
+        Also times it. wait_seconds is how long until the first streamed event: queueing, the SDK's
+        automatic retries (rate limits, overloads) and network. The rest is the model generating
+        (thinking included). retries comes from the SDK's x-stainless-retry-count request header.
+        """
+        start = time.monotonic()
+        wait = None
         with self.client.beta.messages.stream(**self._params(**extra)) as stream:
             for event in stream:
+                if wait is None:
+                    wait = time.monotonic() - start
                 if event.type == "text":
                     self.on_event({"type": "text_delta", "text": event.text})
-            return stream.get_final_message()
+            response = stream.get_final_message()
+        elapsed = time.monotonic() - start
+        timing = {"step": step, "seconds": round(elapsed, 2),
+                  "wait_seconds": round(elapsed if wait is None else wait, 2), "retries": _retries(stream),
+                  "output_tokens": getattr(response.usage, "output_tokens", None),
+                  "stop_reason": response.stop_reason}
+        self._timings.append(timing)
+        self.on_event({"type": "model_call", **timing})
+        return response
 
     def _params(self, **extra: Any) -> dict[str, Any]:
         return dict(
@@ -286,14 +309,54 @@ class RagAgent:
             **extra,
         )
 
-    def _run_tool(self, name: str, args: dict[str, Any]) -> tuple[str, bool]:
-        handler = self.handlers.get(name)
+    def _run_tool(self, name: str, args: dict[str, Any]) -> tuple[str, bool, list[str], float]:
+        """(output, is_error, chunks shown as 'source#index', seconds). Safe to run in parallel:
+        each call records the chunks it shows in its own list."""
+        start = time.monotonic()
+        shown: list[str] = []
+        handler = build_handlers(self.kb, shown, self.search).get(name)
         if handler is None:
-            return f"Unknown tool: {name}", True
+            return f"Unknown tool: {name}", True, [], 0.0
         try:
-            return handler(**args), False
+            output, is_error = handler(**args), False
         except Exception as e:  # report tool failures to the model instead of crashing
-            return f"Tool error: {type(e).__name__}: {e}", True
+            output, is_error = f"Tool error: {type(e).__name__}: {e}", True
+        return output, is_error, shown, time.monotonic() - start
+
+    def _run_tools(self, step: int, blocks: list[Any], calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Run one step's tool calls, in parallel when there are several (searches are independent
+        and each spends most of its time in vector search and reranking, which release the GIL).
+        Returns the tool_result blocks in the order the model asked for them."""
+        todo = []
+        for block in blocks:
+            args = block.input if isinstance(block.input, dict) else json.loads(block.input)
+            calls.append({"name": block.name, "args": args})
+            self.on_event({"type": "tool_call", "id": block.id, "name": block.name, "args": args, "step": step})
+            todo.append((block, args))
+
+        outcomes: dict[int, tuple[str, bool, list[str], float]] = {}
+
+        def done(i: int, outcome: tuple[str, bool, list[str], float]) -> None:
+            outcomes[i] = outcome
+            block = todo[i][0]
+            output, is_error, shown, seconds = outcome
+            self.on_event({"type": "tool_result", "id": block.id, "name": block.name, "is_error": is_error,
+                           "chars": len(output), "results": len(shown), "seconds": round(seconds, 3)})
+
+        if len(todo) == 1:
+            done(0, self._run_tool(todo[0][0].name, todo[0][1]))
+        else:
+            with ThreadPoolExecutor(max_workers=len(todo), thread_name_prefix="rag-tool") as pool:
+                futures = {pool.submit(self._run_tool, b.name, a): i for i, (b, a) in enumerate(todo)}
+                for fut in as_completed(futures):  # events from this thread, as each call finishes
+                    done(futures[fut], fut.result())
+
+        results = []
+        for i, (block, _) in enumerate(todo):
+            output, is_error, shown, _ = outcomes[i]
+            self._seen.extend(shown)  # in request order, so `retrieved` doesn't depend on timing
+            results.append({"type": "tool_result", "tool_use_id": block.id, "content": output, "is_error": is_error})
+        return results
 
     def ask(self, question: str) -> Answer:
         self._close_pending_tool_calls()
@@ -301,18 +364,19 @@ class RagAgent:
         usage = Usage()
         calls: list[dict[str, Any]] = []
         self._seen.clear()
+        self._timings = []
 
         def finish(text: str, stop: str) -> Answer:
             self.total.merge(usage)
             ans = Answer(text, usage, usage.cost_usd, calls, stop, self._citations(text),
-                         list(dict.fromkeys(self._seen)))
+                         list(dict.fromkeys(self._seen)), list(self._timings))
             self.on_event({"type": "answer", "text": text, "stop": stop, "citations": ans.citations})
             self.on_event({"type": "usage", "usage": usage, "cost_usd": ans.cost_usd})
             return ans
 
         stop = "step_limit"
-        for _ in range(self.max_steps):
-            response = self._create()
+        for step in range(1, self.max_steps + 1):
+            response = self._create(step)
             usage.add(response.usage, _served_by(response, self.model))
             # Append the full content (thinking + tool_use blocks), never just the text.
             self.messages.append({"role": "assistant", "content": response.content})
@@ -325,28 +389,15 @@ class RagAgent:
                 return finish(_text(response) or "(no text in response)", "end_turn")
 
             # Run every tool call from this turn; return all results in ONE user message.
-            results = []
-            for block in response.content:
-                if block.type != "tool_use":
-                    continue
-                args = block.input if isinstance(block.input, dict) else json.loads(block.input)
-                calls.append({"name": block.name, "args": args})
-                self.on_event({"type": "tool_call", "id": block.id, "name": block.name, "args": args})
-                seen_before = len(self._seen)
-                output, is_error = self._run_tool(block.name, args)
-                self.on_event({"type": "tool_result", "id": block.id, "name": block.name, "is_error": is_error,
-                               "chars": len(output), "results": len(self._seen) - seen_before})
-                results.append(
-                    {"type": "tool_result", "tool_use_id": block.id, "content": output, "is_error": is_error}
-                )
-            self.messages.append({"role": "user", "content": results})
+            blocks = [b for b in response.content if b.type == "tool_use"]
+            self.messages.append({"role": "user", "content": self._run_tools(step, blocks, calls)})
             if self.max_cost_usd is not None and usage.cost_usd is not None and usage.cost_usd >= self.max_cost_usd:
                 stop = "cost_limit"
                 break
 
         # Out of steps or over the cost cap: ask for a final answer with what it has (no more tools).
         self.messages.append({"role": "user", "content": "Stop searching and answer now with the evidence you have."})
-        response = self._create(tool_choice={"type": "none"})
+        response = self._create(len(self._timings) + 1, tool_choice={"type": "none"})
         usage.add(response.usage, _served_by(response, self.model))
         self.messages.append({"role": "assistant", "content": response.content})
         return finish(_text(response) or "(no text in response)", stop)
@@ -416,6 +467,14 @@ def _blocks(content: Any) -> list[Any]:
 def _field(block: Any, name: str) -> Any:
     """A content block's field: SDK objects use attributes, history restored from disk uses dicts."""
     return block.get(name) if isinstance(block, dict) else getattr(block, name, None)
+
+
+def _retries(stream: Any) -> int | None:
+    """How many times the SDK retried a request before it succeeded (None if unknown)."""
+    try:
+        return int(stream.response.request.headers.get("x-stainless-retry-count", 0))
+    except Exception:  # a fake client, or an SDK without the header
+        return None
 
 
 def _served_by(response: Any, requested: str) -> str:

@@ -52,6 +52,11 @@ def test_chat_stream_and_conversation_roundtrip(client):
     conv = client.get(f"/api/conversations/{cid}").json()
     assert [m["role"] for m in conv["messages"]] == ["user", "assistant", "user", "assistant"]
     assert conv["messages"][1]["steps"][0]["status"] == "done"
+    # Timings are saved with the answer: one per model call, and per tool call under its step.
+    first = conv["messages"][1]
+    assert [c["step"] for c in first["timings"]] == [1, 2] and first["steps"][0]["step"] == 1
+    assert first["steps"][0]["seconds"] >= 0 and all(c["wait_seconds"] <= c["seconds"] for c in first["timings"])
+    assert any(e["type"] == "model_call" for e in evs)
 
     assert len(client.get("/api/conversations").json()) == 1
     assert client.delete(f"/api/conversations/{cid}").json() == {"ok": True}

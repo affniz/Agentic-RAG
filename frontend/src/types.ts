@@ -5,6 +5,18 @@ export type Step = {
   status: "running" | "done" | "error";
   chars?: number;
   results?: number | null;
+  step?: number | null; // which model call asked for it (absent on older saved answers)
+  seconds?: number | null;
+};
+
+/** One model call: total time, and how much of it was waiting for the first streamed byte. */
+export type ModelCall = {
+  step: number;
+  seconds: number;
+  wait_seconds: number;
+  retries: number | null;
+  output_tokens: number | null;
+  stop_reason: string;
 };
 
 // found: the chunk exists. shown: the model was shown it (absent on answers saved before this was tracked).
@@ -33,6 +45,7 @@ export type Turn = {
   model?: string | null;
   feedback?: Feedback | null;
   streaming?: boolean;
+  timings?: ModelCall[];
 };
 
 export type ConversationSummary = {
@@ -76,8 +89,9 @@ export type ChunkView = {
 export type ChatEvent =
   | ({ type: "conversation"; turn_id: string } & ConversationSummary)
   | { type: "text_delta"; text: string }
-  | { type: "tool_call"; id: string; name: string; args: Record<string, unknown> }
-  | { type: "tool_result"; id: string; name: string; is_error: boolean; chars: number; results?: number }
+  | { type: "tool_call"; id: string; name: string; args: Record<string, unknown>; step?: number }
+  | { type: "tool_result"; id: string; name: string; is_error: boolean; chars: number; results?: number; seconds?: number }
+  | ({ type: "model_call" } & ModelCall)
   | { type: "answer"; text: string; stop: string; citations: Citation[] }
   | { type: "usage"; usage: Usage; cost_usd: number | null }
   | { type: "error"; message: string }

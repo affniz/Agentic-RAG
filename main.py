@@ -20,9 +20,15 @@ from rag.store import SEARCH_MODES, KnowledgeBase
 
 
 def print_event(event: dict) -> None:
-    if event["type"] == "tool_call":
+    if event["type"] == "model_call":
+        retried = f", {event['retries']} retries" if event.get("retries") else ""
+        print(f"  [model call {event['step']}: {event['seconds']:.1f}s - waited {event['wait_seconds']:.1f}s "
+              f"for the first byte{retried}, {event['output_tokens']} output tokens]")
+    elif event["type"] == "tool_call":
         shown = ", ".join(f"{k}={v!r}" for k, v in event["args"].items())
         print(f"  -> {event['name']}({shown})")
+    elif event["type"] == "tool_result":
+        print(f"     {event['name']} done in {event['seconds'] * 1000:.0f} ms")
     elif event["type"] == "usage":
         u = event["usage"]
         cost = f"${event['cost_usd']:.4f}" if event["cost_usd"] is not None else "n/a"

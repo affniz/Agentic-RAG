@@ -110,6 +110,7 @@ class Turn:
     stop: str | None = None
     model: str | None = None
     feedback: dict[str, Any] | None = None  # {"rating": "up" | "down", "comment": str}
+    timings: list[dict[str, Any]] = field(default_factory=list)  # one per model call (see RagAgent._create)
 
 
 @dataclass
@@ -343,12 +344,15 @@ async def _run(conv: Conversation, question: str) -> AsyncIterator[str]:
 
     def on_event(event: dict[str, Any]) -> None:
         if event["type"] == "tool_call":
-            step = {"id": event["id"], "name": event["name"], "args": event["args"], "status": "running"}
+            step = {"id": event["id"], "name": event["name"], "args": event["args"], "status": "running",
+                    "step": event.get("step")}
             steps[event["id"]] = step
             turn.steps.append(step)
         elif event["type"] == "tool_result":
             steps[event["id"]].update(status="error" if event["is_error"] else "done", chars=event["chars"],
-                                      results=event.get("results"))
+                                      results=event.get("results"), seconds=event.get("seconds"))
+        elif event["type"] == "model_call":
+            turn.timings.append({k: v for k, v in event.items() if k != "type"})
         elif event["type"] == "usage":
             event = {**event, "usage": asdict(event["usage"]) if isinstance(event["usage"], Usage) else event["usage"]}
         emit(event)
