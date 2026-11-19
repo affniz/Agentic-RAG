@@ -19,7 +19,7 @@ from typing import Any, Callable, Literal
 import anthropic
 from pydantic import BaseModel
 
-from .agent import AGENT_INSTRUCTIONS_V1, Answer, RagAgent, SearchOptions, Usage
+from .agent import AGENT_INSTRUCTIONS_V1, CITATION_RE, Answer, RagAgent, SearchOptions, Usage
 from .baseline import NaiveRag
 from .models import request_options
 from .store import KnowledgeBase
@@ -244,6 +244,7 @@ def answer_eval(
             "verdict": verdict.verdict,
             "judge_reasoning": verdict.reasoning,
             "cited_expected_sources": cited,
+            "unseen_citations": unseen_citations(ans),
             "evidence_recall": _evidence_recall(kb, ans.retrieved, q.get("evidence", [])),
             "retrieved": ans.retrieved,
             "tool_calls": len(ans.tool_calls),
@@ -299,6 +300,7 @@ def _error_row(q: dict[str, Any], sysname: str, rep: int, ans: Answer | None, se
         "id": q["id"], "category": q.get("category", "uncategorized"), "system": sysname, "run": rep + 1,
         "question": q["question"], "answer": ans.text if ans else "", "verdict": "error",
         "judge_reasoning": "", "error": f"{type(e).__name__}: {e}", "cited_expected_sources": None,
+        "unseen_citations": [],
         "evidence_recall": None, "retrieved": ans.retrieved if ans else [],
         "tool_calls": len(ans.tool_calls) if ans else 0, "api_calls": ans.usage.api_calls if ans else 0,
         "usage": ans.usage.__dict__ if ans else {}, "cost_usd": (ans.cost_usd or 0.0) if ans else 0.0,
@@ -306,7 +308,12 @@ def _error_row(q: dict[str, Any], sysname: str, rep: int, ans: Answer | None, se
     }
 
 
-RANGED = ("correct", "partially_correct", "evidence_recall", "cited_expected_sources")
+def unseen_citations(ans: Answer) -> list[str]:
+    """Citations of chunks the system never showed the model: guesses presented as evidence."""
+    return sorted({f"{s}#{i}" for s, i in CITATION_RE.findall(ans.text)} - set(ans.retrieved))
+
+
+RANGED = ("correct", "partially_correct", "evidence_recall", "cited_expected_sources", "cited_unseen")
 
 
 def combine_runs(rows: list[dict[str, Any]], repeats: int) -> dict[str, Any]:
@@ -354,6 +361,8 @@ def summarize(all_rows: list[dict[str, Any]]) -> dict[str, Any]:
                         for c, rs in sorted(by_cat.items())},
         "cited_expected_sources": sum(bool(r["cited_expected_sources"]) for r in with_src) / len(with_src) if with_src else None,
         "evidence_recall": sum(r["evidence_recall"] for r in with_ev) / len(with_ev) if with_ev else None,
+        # Share of answers citing at least one chunk the system never showed the model (lower is better).
+        "cited_unseen": sum(bool(r.get("unseen_citations")) for r in rows) / n,
         "avg_tool_calls": sum(r["tool_calls"] for r in rows) / n,
         "avg_api_calls": sum(r["api_calls"] for r in rows) / n,
         "avg_seconds": sum(r["seconds"] for r in rows) / n,

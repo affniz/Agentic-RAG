@@ -34,7 +34,7 @@ question ─► Claude (claude-haiku-5-5) ──tool calls──► list_documen
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt     # or: pip install -r requirements.lock  (exact versions of a known-good setup, Python 3.14)
+pip install -r requirements.txt -c requirements.lock   # exact, tested versions (Python 3.14); drop -c for the latest
 export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
@@ -208,3 +208,7 @@ pip install -r requirements-dev.txt && pytest -q   # no API key needed
 - **Prices** – list prices in `rag/models.py` (checked on the date in `PRICES_CHECKED`); each API call is priced separately, so Haiku calls with prompts over 100K tokens use the higher rate.
 - **Prompt caching** – the conversation prefix is cached automatically, so the agent's repeated calls within a question cost less once the prompt is long enough to be cached.
 - **Step limit** – `max_steps=12` model calls per question; after that it is told to answer with what it has.
+- **Cost limit** – in chat, once one question has cost $0.50 (Settings screen; `--max-cost` for `ask` / `chat`, off by
+  default there) the agent stops searching and answers with what it has. The answer is marked as stopped early.
+- **Citations** – a citation chip turns amber when the model cited a chunk it was never shown, and answer evals
+  report the share of answers that did (`cited unseen chunks`).

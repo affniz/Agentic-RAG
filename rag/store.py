@@ -9,6 +9,7 @@ import re
 import sys
 import threading
 import time
+import unicodedata
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -243,8 +244,27 @@ def chunk_document(source: str, text: str, markdown: bool) -> list[Chunk]:
     return chunks
 
 
+# Scripts written without spaces between words: Hiragana, Katakana, CJK ideographs, Hangul.
+_CJK = "\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff"
+_TOKEN_RE = re.compile(rf"[{_CJK}]+|[^\W_{_CJK}]+")
+_CJK_RE = re.compile(rf"[{_CJK}]")
+
+
+def _fold(word: str) -> str:
+    """Drop accents, so 'café' matches 'cafe' and 'Müller' matches 'Muller'."""
+    return "".join(ch for ch in unicodedata.normalize("NFKD", word) if not unicodedata.combining(ch))
+
+
 def _tokenize(text: str) -> list[str]:
-    return re.findall(r"[a-z0-9]+", text.lower())
+    """Keyword-search tokens: words in any script (case- and accent-insensitive), and overlapping
+    character pairs for scripts without spaces, which is how keyword search usually handles them."""
+    out: list[str] = []
+    for tok in _TOKEN_RE.findall(unicodedata.normalize("NFKC", text).casefold()):
+        if _CJK_RE.match(tok):
+            out += [tok] if len(tok) == 1 else [tok[i : i + 2] for i in range(len(tok) - 1)]
+        else:
+            out.append(_fold(tok))
+    return out
 
 
 def _write_atomic(path: Path, text: str) -> None:

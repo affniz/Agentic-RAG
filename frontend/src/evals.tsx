@@ -577,7 +577,7 @@ function RunDetail({ file, onClose }: { file: string; onClose: () => void }) {
               <div className="text-xs text-zinc-500">{systemLabel(s)}</div>
               <div className="text-2xl font-semibold tabular-nums">{pct(v.correct)}</div>
               <div className="text-xs text-zinc-500">
-                partial {pct(v.partially_correct)} · evidence {pct(v.evidence_recall)} · {v.avg_api_calls.toFixed(1)} calls · {v.avg_seconds.toFixed(1)}s · {usd(v.cost_usd)}
+                partial {pct(v.partially_correct)} · evidence {pct(v.evidence_recall)} ·{v.cited_unseen ? ` cited unread ${pct(v.cited_unseen)} ·` : ""} {v.avg_api_calls.toFixed(1)} calls · {v.avg_seconds.toFixed(1)}s · {usd(v.cost_usd)}
               </div>
               <div className="mt-2 flex flex-wrap gap-1">
                 {Object.entries(v.by_category).map(([c, st]) => (
@@ -663,6 +663,9 @@ function RunDetail({ file, onClose }: { file: string; onClose: () => void }) {
                             Answer <span className="font-normal normal-case">· {r.api_calls} API calls, {r.tool_calls} tool calls, {r.seconds}s{r.stop !== "end_turn" ? `, stopped: ${r.stop}` : ""}</span>
                           </div>
                           <div className="prose-answer mt-1 text-sm"><ReactMarkdown remarkPlugins={[remarkGfm]}>{r.answer}</ReactMarkdown></div>
+                          {!!r.unseen_citations?.length && (
+                            <p className="mt-1 text-xs text-amber-700 dark:text-amber-400">Cited without having read: {r.unseen_citations.join(", ")}</p>
+                          )}
                         </div>
                       </div>
                     </td>

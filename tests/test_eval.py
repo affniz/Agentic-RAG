@@ -204,3 +204,16 @@ def test_an_invalid_api_key_stops_the_eval(kb, tmp_path):
         answer_eval(kb, EVAL_QS, model="claude-haiku-5-5", systems=("agentic",), out_dir=tmp_path,
                     client=_flaky("", err), log=lambda _: None)
     assert not list(tmp_path.glob("*.json"))
+
+
+def test_unseen_citations_are_counted(kb):
+    from rag.agent import Answer, Usage
+    from rag.evaluate import summarize, unseen_citations
+
+    ans = Answer("Tier 3 [offices.md#0], manager [people.md#0] [people.md#7].", Usage(), 0.0,
+                 retrieved=["offices.md#0"])
+    assert unseen_citations(ans) == ["people.md#0", "people.md#7"]
+    row = {"verdict": "correct", "category": "c", "cited_expected_sources": None, "evidence_recall": None,
+           "tool_calls": 0, "api_calls": 1, "seconds": 1.0, "cost_usd": 0.0, "judge_cost_usd": 0.0}
+    s = summarize([{**row, "unseen_citations": ["people.md#0"]}, {**row, "unseen_citations": []}])
+    assert s["cited_unseen"] == 0.5

@@ -25,6 +25,8 @@ class Settings(BaseModel):
     search_k: int | None = Field(None, ge=1, le=10)  # results per search; None = the model decides
     rerank: bool = True
     max_steps: int = Field(12, ge=1, le=30)
+    # Chat only: once one question has cost this much (USD), the agent answers with what it has.
+    max_cost_usd: float | None = Field(0.5, gt=0, le=100)
 
 
 class JsonFile:

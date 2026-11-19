@@ -495,3 +495,17 @@ def test_vectors_lost_by_an_interrupted_rebuild_are_restored(tmp_path, monkeypat
     assert r.embedded == n and r.added == r.updated == []
     assert kb2._col.count() == n
     assert kb2.search("london hotel", k=1, mode="vector")[0][0].source == "travel.txt"
+
+
+def test_keyword_search_handles_accents_and_scripts_without_spaces(tmp_path):
+    d = tmp_path / "docs"
+    d.mkdir()
+    (d / "de.md").write_text("# Reise\nDie Geschäftsreise nach München wird erstattet.")
+    (d / "ja.md").write_text("# 休暇\n有給休暇は年間20日です。")
+    (d / "en.md").write_text("# Travel\nHotel cap is $350 per night in London.")
+    kb = KnowledgeBase(tmp_path / "idx", rerank=False)
+    kb.ingest(d)
+    assert kb.search("geschaftsreise munchen", k=1, mode="bm25")[0][0].source == "de.md"  # accents folded
+    assert kb.search("Geschäftsreise", k=1, mode="bm25")[0][0].source == "de.md"
+    assert kb.search("有給休暇", k=1, mode="bm25")[0][0].source == "ja.md"
+    assert kb.search("London hotel", k=1, mode="bm25")[0][0].source == "en.md"
