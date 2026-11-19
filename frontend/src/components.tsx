@@ -223,11 +223,17 @@ export function Answer({ turn, onCite, onFeedback }: {
                 const [, src, idx] = href.match(/^cite:(.*):(\d+)$/) ?? [];
                 const ref = { source: decodeURIComponent(src), index: Number(idx) };
                 const n = order.findIndex((r) => r.source === ref.source && r.index === ref.index) + 1;
-                const missing = found(ref)?.found === false;
+                const meta = found(ref);
+                const missing = meta?.found === false;
+                const unseen = !missing && meta?.shown === false;  // exists, but the model never read it
                 return (
-                  <button onClick={() => onCite(ref)} title={`${ref.source} #${ref.index}`}
+                  <button onClick={() => onCite(ref)}
+                    title={missing ? `${ref.source} #${ref.index} does not exist`
+                      : unseen ? `${ref.source} #${ref.index} - the model cited this without having read it`
+                      : `${ref.source} #${ref.index}`}
                     className={`mx-0.5 inline-grid h-5 min-w-5 -translate-y-px place-items-center rounded-full px-1 align-middle text-[11px] font-semibold
                       ${missing ? "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300"
+                        : unseen ? "bg-amber-100 text-amber-800 hover:bg-amber-200 dark:bg-amber-900/40 dark:text-amber-300"
                         : "bg-indigo-100 text-indigo-700 hover:bg-indigo-200 dark:bg-indigo-900/50 dark:text-indigo-300 dark:hover:bg-indigo-900"}`}>
                     {n || "?"}
                   </button>
@@ -250,6 +256,7 @@ export function Answer({ turn, onCite, onFeedback }: {
                 className="flex max-w-full items-center gap-1.5 rounded-md border border-zinc-200 px-2 py-1 text-xs text-zinc-600 hover:border-indigo-300 hover:bg-indigo-50 dark:border-zinc-800 dark:text-zinc-400 dark:hover:border-indigo-800 dark:hover:bg-indigo-950/40">
                 <span className="font-semibold text-indigo-600 dark:text-indigo-400">{i + 1}</span>
                 <span className="truncate">{c.source}</span>
+                {meta?.shown === false && meta.found && <span className="shrink-0 text-amber-700 dark:text-amber-400" title="The model cited this chunk without having read it">not read</span>}
                 {meta?.section && <span className="hidden truncate text-zinc-400 sm:inline">· {meta.section.split(" > ").pop()}</span>}
               </button>
             );
@@ -265,6 +272,11 @@ export function Answer({ turn, onCite, onFeedback }: {
               {turn.usage.api_calls} API call{turn.usage.api_calls === 1 ? "" : "s"}
               {turn.seconds != null && <> · {turn.seconds.toFixed(1)}s</>}
             </div>
+          )}
+          {(turn.stop === "step_limit" || turn.stop === "cost_limit") && (
+            <span className="text-xs text-amber-700 dark:text-amber-400" title="Change the limit on the Settings screen">
+              {turn.stop === "step_limit" ? "Stopped early: step limit reached" : "Stopped early: cost limit reached"}
+            </span>
           )}
           {onFeedback && turn.stop !== "error" && <FeedbackButtons feedback={turn.feedback ?? null} onChange={onFeedback} />}
         </div>

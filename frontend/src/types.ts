@@ -7,7 +7,8 @@ export type Step = {
   results?: number | null;
 };
 
-export type Citation = { source: string; index: number; section: string | null; found: boolean };
+// found: the chunk exists. shown: the model was shown it (absent on answers saved before this was tracked).
+export type Citation = { source: string; index: number; section: string | null; found: boolean; shown?: boolean };
 
 export type Usage = {
   input_tokens: number;
@@ -62,6 +63,7 @@ export type Settings = {
   search_k: number | null;
   rerank: boolean;
   max_steps: number;
+  max_cost_usd: number | null;
 };
 
 export type ChunkView = {
@@ -150,6 +152,7 @@ export type SystemSummary = {
   partially_correct: number;
   by_category: Record<string, { n: number; correct: number; range?: [number, number] }>;
   cited_expected_sources: number | null;
+  cited_unseen?: number; // share of answers citing a chunk the model was never shown
   evidence_recall: number | null;
   avg_tool_calls: number;
   avg_api_calls: number;
@@ -159,6 +162,7 @@ export type SystemSummary = {
   runs?: number;
   range?: Record<string, [number, number]>;
   unstable?: string[];
+  errors?: number; // questions that failed with an error; left out of the metrics above
 };
 
 export type RetrievalMetrics = { "recall@k": number; "hit@k": number; mrr: number; note?: string };
@@ -192,9 +196,11 @@ export type EvalRow = {
   run: number;
   question: string;
   answer: string;
-  verdict: "correct" | "partially_correct" | "incorrect";
+  verdict: "correct" | "partially_correct" | "incorrect" | "error";
   judge_reasoning: string;
+  error?: string;
   cited_expected_sources: boolean | null;
+  unseen_citations?: string[];
   evidence_recall: number | null;
   tool_calls: number;
   api_calls: number;

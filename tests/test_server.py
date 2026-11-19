@@ -77,6 +77,8 @@ def test_settings_apply_to_the_agent(client):
 
     agent = app_module.conversations[evs[0]["id"]].agent
     assert (agent.max_steps, agent.search.k, agent.effort) == (4, 2, "high")
+    assert s["max_cost_usd"] == 0.5 and agent.max_cost_usd == 0.5  # default cap applies to chat
+    assert client.put("/api/settings", json={**s, "max_cost_usd": 0}).status_code == 422
     result = next(e for e in evs if e["type"] == "tool_result")
     assert result["results"] == 1  # one chunk in the index
 

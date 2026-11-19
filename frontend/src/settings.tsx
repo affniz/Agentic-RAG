@@ -111,6 +111,23 @@ export function SettingsPage({ health, settings, onSave }: {
               <span className="w-6 text-right text-sm tabular-nums">{draft.max_steps}</span>
             </div>
           </Field>
+
+          <Field label="Cost limit per question" htmlFor="s-cost"
+            hint={draft.max_cost_usd == null
+              ? "No limit: a question can make as many model calls as the step limit allows."
+              : `Once a question has cost $${draft.max_cost_usd.toFixed(2)}, the agent stops searching and answers with what it has (that last call can take it a little over). Chat only; evals show their own estimate before running.`}>
+            <div className="flex items-center gap-3">
+              <label className="flex shrink-0 items-center gap-1.5 text-sm">
+                <input type="checkbox" checked={draft.max_cost_usd == null} onChange={(e) => set("max_cost_usd", e.target.checked ? null : 0.5)} />
+                No limit
+              </label>
+              <span className="text-sm text-zinc-500">$</span>
+              <input id="s-cost" type="number" min={0.01} max={100} step={0.05} value={draft.max_cost_usd ?? ""}
+                disabled={draft.max_cost_usd == null}
+                onChange={(e) => { const v = Number(e.target.value); if (v > 0) set("max_cost_usd", v); }}
+                className={`${input} disabled:opacity-40`} />
+            </div>
+          </Field>
         </div>
 
         <div className="mt-2 flex flex-wrap items-center gap-3">

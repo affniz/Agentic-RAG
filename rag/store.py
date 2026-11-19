@@ -9,6 +9,7 @@ import re
 import sys
 import threading
 import time
+import unicodedata
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -243,8 +244,27 @@ def chunk_document(source: str, text: str, markdown: bool) -> list[Chunk]:
     return chunks
 
 
+# Scripts written without spaces between words: Hiragana, Katakana, CJK ideographs, Hangul.
+_CJK = "\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff"
+_TOKEN_RE = re.compile(rf"[{_CJK}]+|[^\W_{_CJK}]+")
+_CJK_RE = re.compile(rf"[{_CJK}]")
+
+
+def _fold(word: str) -> str:
+    """Drop accents, so 'café' matches 'cafe' and 'Müller' matches 'Muller'."""
+    return "".join(ch for ch in unicodedata.normalize("NFKD", word) if not unicodedata.combining(ch))
+
+
 def _tokenize(text: str) -> list[str]:
-    return re.findall(r"[a-z0-9]+", text.lower())
+    """Keyword-search tokens: words in any script (case- and accent-insensitive), and overlapping
+    character pairs for scripts without spaces, which is how keyword search usually handles them."""
+    out: list[str] = []
+    for tok in _TOKEN_RE.findall(unicodedata.normalize("NFKC", text).casefold()):
+        if _CJK_RE.match(tok):
+            out += [tok] if len(tok) == 1 else [tok[i : i + 2] for i in range(len(tok) - 1)]
+        else:
+            out.append(_fold(tok))
+    return out
 
 
 def _write_atomic(path: Path, text: str) -> None:
@@ -391,8 +411,13 @@ class KnowledgeBase:
         force: files (relative paths) to re-read even if unchanged, e.g. after transcribing one.
         Searches keep working during an ingest and see the old index until the new one is swapped in.
         """
+        docs_dir = Path(docs_dir)
+        # A missing folder would otherwise look like "every file was deleted" and wipe the index,
+        # including paid transcriptions. An existing empty folder is a real (if drastic) state.
+        if not docs_dir.is_dir():
+            raise FileNotFoundError(f"documents folder not found: {docs_dir}")
         with self._ingest_lock:
-            return self._ingest(Path(docs_dir), rebuild, on_progress or (lambda *_: None), set(force))
+            return self._ingest(docs_dir, rebuild, on_progress or (lambda *_: None), set(force))
 
     def _ingest(self, docs_dir: Path, rebuild: bool, progress: ProgressFn, force: set[str]) -> IngestReport:
         manifest = self._manifest()
@@ -444,8 +469,12 @@ class KnowledgeBase:
 
         # 2. Embed only chunks the collection doesn't already hold. Ids are content hashes, so an
         # unchanged chunk of an edited file (or one left by an interrupted ingest) is reused.
+        # Kept chunks are checked too: after an interrupted rebuild (which empties the collection
+        # first) or a damaged collection, their vectors are missing and are embedded again here.
+        gone = reread | set(removed)
+        kept = [c for c in old_chunks if c.source not in gone]
         stored = set(self._col.get(include=[])["ids"])
-        to_embed = [c for c in fresh if c.id not in stored]
+        to_embed = [c for c in fresh + kept if c.id not in stored]
         for start in range(0, len(to_embed), 64):
             progress("embedding", start, len(to_embed))
             batch = to_embed[start : start + 64]
@@ -457,8 +486,7 @@ class KnowledgeBase:
         progress("embedding", len(to_embed), len(to_embed))
 
         # 3. Swap in the new chunk list. Old chunks go only for files that were re-read or removed.
-        gone = reread | set(removed)
-        chunks = sorted([c for c in old_chunks if c.source not in gone] + fresh, key=lambda c: (c.source, c.index))
+        chunks = sorted(kept + fresh, key=lambda c: (c.source, c.index))
         _write_atomic(self._chunks_file, json.dumps([asdict(c) for c in chunks]))
         # A file that failed keeps the hash its current chunks came from (none if it was never read),
         # so it still differs from the file on disk and is retried on every ingest until it reads.

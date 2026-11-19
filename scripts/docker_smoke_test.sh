@@ -16,7 +16,7 @@ wait_healthy() {
 }
 json() { python3 -c "import sys, json; d = json.load(sys.stdin); print($1)"; }
 
-docker run -d --name "$NAME" -p "$PORT:8000" -e RAG_FAKE_LLM=1 -e RAG_RERANK=0 -e HF_HUB_OFFLINE=1 "$IMAGE" >/dev/null
+docker run -d --name "$NAME" -p "127.0.0.1:$PORT:8000" -e RAG_FAKE_LLM=1 -e RAG_RERANK=0 -e HF_HUB_OFFLINE=1 "$IMAGE" >/dev/null
 wait_healthy
 curl -sf "$URL/" | grep -q "<title>" || fail "UI not served"
 

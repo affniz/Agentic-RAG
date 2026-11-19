@@ -1,6 +1,7 @@
 # Agentic RAG: web UI + API in one image.
 #   docker build -t agentic-rag .
-#   docker run -p 8000:8000 -e ANTHROPIC_API_KEY -v rag-data:/data agentic-rag
+#   docker run -p 127.0.0.1:8000:8000 -e ANTHROPIC_API_KEY -v rag-data:/data agentic-rag
+# Keep the 127.0.0.1: the API has no login, and the Host check doesn't stop other machines (see README).
 # Demo mode (no API key, fake model, real search): add -e RAG_FAKE_LLM=1.
 # Your own documents: -v /path/to/docs:/app/docs
 
@@ -13,7 +14,8 @@ COPY frontend/ ./
 RUN npm run build
 
 # ---- app
-FROM python:3.13-slim
+# Python 3.14: the version requirements.lock was made with.
+FROM python:3.14-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -29,8 +31,9 @@ RUN useradd --create-home --home-dir /home/app --uid 1000 app \
     && mkdir -p /app /data && chown app:app /app /data
 WORKDIR /app
 
-COPY requirements.txt ./
-RUN pip install -r requirements.txt
+# Exact versions from the lock file (as constraints, so the test tools in it aren't installed).
+COPY requirements.txt requirements.lock ./
+RUN pip install -r requirements.txt -c requirements.lock
 
 USER app
 # Bake in the embedding model and (unless --build-arg BAKE_RERANKER=0) the reranker, so the

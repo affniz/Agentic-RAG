@@ -324,6 +324,7 @@ async def chat(req: ChatRequest) -> StreamingResponse:
 
     # Settings apply from the next question on, also in existing conversations.
     conv.agent.model, conv.agent.effort, conv.agent.max_steps = model, effort, settings.max_steps
+    conv.agent.max_cost_usd = settings.max_cost_usd
     conv.agent.search.k, conv.agent.search.rerank = settings.search_k, settings.rerank
     conv.turns.append(Turn("user", req.message))
     return StreamingResponse(_run(conv, req.message), media_type="text/event-stream",

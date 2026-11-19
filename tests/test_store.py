@@ -1,3 +1,5 @@
+import pytest
+
 from rag.store import KnowledgeBase, _chunk, _sections, chunk_document
 
 
@@ -450,3 +452,60 @@ def test_vectors_left_by_an_interrupted_ingest_are_reused_or_cleaned(tmp_path):
     r = KnowledgeBase(tmp_path / "idx", rerank=False).ingest(docs)
     assert r.embedded == 0  # the vector from the interrupted run is reused
     assert sorted(kb._col.get(include=[])["ids"]) == sorted(c.id for c in KnowledgeBase(tmp_path / "idx", rerank=False).chunks)
+
+
+def test_missing_docs_folder_changes_nothing(tmp_path):
+    # Before the guard, a typo in the folder name looked like "every file was deleted".
+    docs = make_docs(tmp_path)
+    kb = KnowledgeBase(tmp_path / "idx", rerank=False)
+    kb.ingest(docs)
+    before = (len(kb.chunks), kb.indexed_files())
+    with pytest.raises(FileNotFoundError):
+        kb.ingest(tmp_path / "doc")
+    assert (len(kb.chunks), kb.indexed_files()) == before
+    assert len(KnowledgeBase(tmp_path / "idx", rerank=False).chunks) == before[0]
+
+
+def test_vectors_lost_by_an_interrupted_rebuild_are_restored(tmp_path, monkeypatch):
+    docs = make_docs(tmp_path)
+    kb = KnowledgeBase(tmp_path / "idx", rerank=False)
+    kb.ingest(docs)
+    n = len(kb.chunks)
+
+    class NoAdd:  # the rebuild empties the collection, then dies while embedding
+        def __init__(self, col):
+            self._col = col
+
+        def __getattr__(self, name):
+            return getattr(self._col, name)
+
+        def add(self, **_):
+            raise RuntimeError("killed mid-rebuild")
+
+    real = kb._get_collection
+    monkeypatch.setattr(kb, "_get_collection", lambda: NoAdd(real()))
+    with pytest.raises(RuntimeError):
+        kb.ingest(docs, rebuild=True)
+    assert kb._col.count() == 0
+
+    # After a restart nothing on disk changed, so every file looks unchanged - but its vectors are gone.
+    kb2 = KnowledgeBase(tmp_path / "idx", rerank=False)
+    assert len(kb2.chunks) == n
+    r = kb2.ingest(docs)
+    assert r.embedded == n and r.added == r.updated == []
+    assert kb2._col.count() == n
+    assert kb2.search("london hotel", k=1, mode="vector")[0][0].source == "travel.txt"
+
+
+def test_keyword_search_handles_accents_and_scripts_without_spaces(tmp_path):
+    d = tmp_path / "docs"
+    d.mkdir()
+    (d / "de.md").write_text("# Reise\nDie Geschäftsreise nach München wird erstattet.")
+    (d / "ja.md").write_text("# 休暇\n有給休暇は年間20日です。")
+    (d / "en.md").write_text("# Travel\nHotel cap is $350 per night in London.")
+    kb = KnowledgeBase(tmp_path / "idx", rerank=False)
+    kb.ingest(d)
+    assert kb.search("geschaftsreise munchen", k=1, mode="bm25")[0][0].source == "de.md"  # accents folded
+    assert kb.search("Geschäftsreise", k=1, mode="bm25")[0][0].source == "de.md"
+    assert kb.search("有給休暇", k=1, mode="bm25")[0][0].source == "ja.md"
+    assert kb.search("London hotel", k=1, mode="bm25")[0][0].source == "en.md"

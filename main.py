@@ -54,6 +54,8 @@ def main() -> None:
         s.add_argument("-q", "--quiet", action="store_true", help="hide tool calls and cost")
         s.add_argument("--model", default=None, help="e.g. claude-sonnet-5-5, claude-opus-5-5, claude-haiku-5-5")
         s.add_argument("--effort", default="medium", choices=["low", "medium", "high", "xhigh", "max"])
+        s.add_argument("--max-cost", type=float, default=None,
+                       help="USD per question; past it the agent stops searching and answers")
 
     s = sub.add_parser("eval")
     s.add_argument("--set", default="evals/basic", help="eval set directory (evals/basic, evals/hard)")
@@ -78,7 +80,10 @@ def main() -> None:
     kb = KnowledgeBase(args.index, rerank=not args.no_rerank, pdf_ocr=ocr)
 
     if args.cmd == "ingest":
-        r = kb.ingest(args.docs_dir, rebuild=args.rebuild)
+        try:
+            r = kb.ingest(args.docs_dir, rebuild=args.rebuild)
+        except FileNotFoundError as e:
+            sys.exit(f"{e} - nothing was changed.")
         print(f"Index: {r.chunks} chunks from {len(kb.sources())} documents "
               f"(added {len(r.added)}, updated {len(r.updated)}, removed {len(r.removed)}, unchanged {r.unchanged}; {r.embedded} chunks embedded).")
         for name, reason in r.failed.items():
@@ -104,7 +109,8 @@ def main() -> None:
             run_eval(args, model)
             return
 
-        agent = RagAgent(kb, model=model, effort=args.effort, on_event=None if args.quiet else print_event)
+        agent = RagAgent(kb, model=model, effort=args.effort, on_event=None if args.quiet else print_event,
+                         max_cost_usd=args.max_cost)
         if args.cmd == "ask":
             print(agent.ask(args.question).text)
             return
@@ -187,10 +193,13 @@ def run_eval(args: argparse.Namespace, model: str) -> None:
     print(f"{'partially correct':<28}" + "".join(f"{ranged(res[n], 'partially_correct'):>{w}}" for n in systems))
     print(f"{'evidence retrieved':<28}" + "".join(f"{ranged(res[n], 'evidence_recall'):>{w}}" for n in systems))
     print(f"{'cited expected sources':<28}" + "".join(f"{ranged(res[n], 'cited_expected_sources'):>{w}}" for n in systems))
+    print(f"{'cited unseen chunks':<28}" + "".join(f"{ranged(res[n], 'cited_unseen'):>{w}}" for n in systems))
     print(f"{'avg API calls':<28}" + "".join(f"{res[n]['avg_api_calls']:>{w}.1f}" for n in systems))
     print(f"{'avg seconds':<28}" + "".join(f"{res[n]['avg_seconds']:>{w}.1f}" for n in systems))
     cost_label = "cost per run (USD)" if s["repeats"] > 1 else "cost (USD)"
     print(f"{cost_label:<28}" + "".join(f"{'$' + format(res[n]['cost_usd'], '.3f'):>{w}}" for n in systems))
+    if any(res[n]["errors"] for n in systems):
+        print(f"{'errors (left out above)':<28}" + "".join(f"{res[n]['errors']:>{w}}" for n in systems))
     if s["repeats"] > 1:
         for n in systems:
             unstable = res[n]["unstable"]

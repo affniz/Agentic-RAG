@@ -81,8 +81,9 @@ def test_streaming_events_and_citations(kb):
     streamed = "".join(e["text"] for e in events if e["type"] == "text_delta")
     assert streamed == ans.text
     assert ans.citations == [
-        {"source": "vacation.md", "index": 0, "section": "Vacation", "found": True},
-        {"source": "nope.md", "index": 9, "section": None, "found": False},
+        # No search ran, so neither was shown to the model.
+        {"source": "vacation.md", "index": 0, "section": "Vacation", "found": True, "shown": False},
+        {"source": "nope.md", "index": 9, "section": None, "found": False, "shown": False},
     ]
     assert [e["type"] for e in events][-2:] == ["answer", "usage"]
 
@@ -142,3 +143,67 @@ def test_cost_uses_the_model_that_served_the_response(kb):
     msg.model = "claude-opus-5-5"  # e.g. a refusal fallback answered instead
     ans = RagAgent(kb, client=FakeClient([msg]), model="claude-sonnet-5-5").ask("q")
     assert ans.cost_usd == pytest.approx((100 * 4 + 50 * 20) / 1e6)
+
+
+def test_cut_off_tool_call_is_closed_before_the_next_question(kb):
+    # A response cut off at max_tokens can end in a tool_use that never ran. The API rejects any
+    # request with an unanswered tool_use, so without a fix every later question would fail.
+    client = FakeClient([
+        message(stop_reason="max_tokens", usage=usage(100, 50),
+                content=[text("Let me check."), tool("t1", "search_knowledge_base", query="carry")]),
+        message(stop_reason="end_turn", usage=usage(100, 50), content=[text("a2")]),
+    ])
+    agent = RagAgent(kb, client=client)
+    assert agent.ask("q1").stop == "max_tokens"
+    assert agent.ask("q2").text == "a2"
+    sent = client.requests[1]["messages"]
+    assert [m["role"] for m in sent] == ["user", "assistant", "user", "user"]
+    assert sent[2]["content"][0]["tool_use_id"] == "t1" and sent[2]["content"][0]["is_error"] is True
+    assert sent[3]["content"] == "q2"
+
+
+def test_saved_history_with_an_open_tool_call_is_repaired(kb):
+    # Conversations restored from disk hold plain dicts, and may have been saved in the broken state.
+    client = FakeClient([message(stop_reason="end_turn", usage=usage(100, 50), content=[text("ok")])])
+    agent = RagAgent(kb, client=client)
+    agent.messages = [
+        {"role": "user", "content": "q1"},
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "t9", "name": "list_documents", "input": {}}]},
+    ]
+    agent.ask("q2")
+    assert client.requests[0]["messages"][2]["content"][0]["tool_use_id"] == "t9"
+
+
+def test_citations_of_chunks_never_shown_are_flagged(kb):
+    # vacation.md#0 was shown by the search; vacation.md#5 doesn't exist; a second document's
+    # chunk that exists but was never retrieved is a guess.
+    docs = kb.index_dir.parent / "docs"  # the fixture's folder
+    (docs / "other.md").write_text("# Other\nUnrelated text.")
+    kb.ingest(docs)
+    client = FakeClient([
+        message(stop_reason="tool_use", content=[tool("t1", "search_knowledge_base", query="carry", k=1, source="vacation.md")]),
+        message(stop_reason="end_turn", content=[text("5 days [vacation.md#0], see [other.md#0] and [vacation.md#5].")]),
+        message(stop_reason="end_turn", content=[text("Still 5 [vacation.md#0].")]),
+    ])
+    agent = RagAgent(kb, client=client)
+    cites = {(c["source"], c["index"]): c for c in agent.ask("q").citations}
+    assert cites[("vacation.md", 0)]["shown"] and cites[("vacation.md", 0)]["found"]
+    assert cites[("other.md", 0)]["found"] and not cites[("other.md", 0)]["shown"]
+    assert not cites[("vacation.md", 5)]["found"]
+    # A follow-up may cite a chunk shown for an earlier question in the same chat.
+    assert agent.ask("and?").citations[0]["shown"]
+
+
+def test_cost_cap_stops_searching_and_answers(kb):
+    looping = [message(stop_reason="tool_use", usage=usage(100_000, 0), content=[tool(f"t{i}", "list_documents")])
+               for i in range(5)]
+    client = FakeClient(looping[:2] + [message(stop_reason="end_turn", content=[text("what I have")])])
+    # Haiku input is $0.10 / M tokens: each call costs $0.01, so a $0.015 cap stops after two calls.
+    ans = RagAgent(kb, client=client, model="claude-haiku-5-5", max_cost_usd=0.015).ask("q")
+    assert ans.stop == "cost_limit" and ans.text == "what I have" and ans.usage.api_calls == 3
+    assert client.requests[-1]["tool_choice"] == {"type": "none"}
+
+
+def test_prompt_says_documents_are_not_instructions(kb):
+    agent = RagAgent(kb, client=FakeClient([]))
+    assert "not instructions to you" in agent.system

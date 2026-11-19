@@ -29,6 +29,7 @@ const VERDICT = {
   correct: { label: "Correct", cls: "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300", icon: Icon.check },
   partially_correct: { label: "Partial", cls: "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300", icon: Icon.alert },
   incorrect: { label: "Incorrect", cls: "bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300", icon: Icon.x },
+  error: { label: "Error", cls: "bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300", icon: Icon.alert },
 } as const;
 
 const btn = "inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium disabled:opacity-50";
@@ -576,13 +577,14 @@ function RunDetail({ file, onClose }: { file: string; onClose: () => void }) {
               <div className="text-xs text-zinc-500">{systemLabel(s)}</div>
               <div className="text-2xl font-semibold tabular-nums">{pct(v.correct)}</div>
               <div className="text-xs text-zinc-500">
-                partial {pct(v.partially_correct)} · evidence {pct(v.evidence_recall)} · {v.avg_api_calls.toFixed(1)} calls · {v.avg_seconds.toFixed(1)}s · {usd(v.cost_usd)}
+                partial {pct(v.partially_correct)} · evidence {pct(v.evidence_recall)} ·{v.cited_unseen ? ` cited unread ${pct(v.cited_unseen)} ·` : ""} {v.avg_api_calls.toFixed(1)} calls · {v.avg_seconds.toFixed(1)}s · {usd(v.cost_usd)}
               </div>
               <div className="mt-2 flex flex-wrap gap-1">
                 {Object.entries(v.by_category).map(([c, st]) => (
                   <span key={c} className="rounded bg-white px-1.5 py-0.5 text-xs text-zinc-600 dark:bg-zinc-950 dark:text-zinc-400">{c} {pct(st.correct)}</span>
                 ))}
               </div>
+              {!!v.errors && <div className="mt-1 text-xs text-red-700 dark:text-red-400">{v.errors} failed with an error and {v.errors === 1 ? "is" : "are"} left out of these numbers</div>}
               {v.unstable && v.unstable.length > 0 && <div className="mt-1 text-xs text-amber-700 dark:text-amber-400">Flipped between runs: {v.unstable.join(", ")}</div>}
             </div>
           );
@@ -645,15 +647,25 @@ function RunDetail({ file, onClose }: { file: string; onClose: () => void }) {
                   <tr key={`${key}-detail`} className="bg-zinc-50/60 dark:bg-zinc-900/40">
                     <td colSpan={5} className="px-4 pb-4 pt-1">
                       <div className="ml-5 space-y-3">
-                        <div>
-                          <div className="text-xs font-medium uppercase tracking-wide text-zinc-500">Judge's reasoning</div>
-                          <p className="mt-1 text-sm">{r.judge_reasoning}</p>
-                        </div>
+                        {r.error ? (
+                          <div>
+                            <div className="text-xs font-medium uppercase tracking-wide text-zinc-500">Error</div>
+                            <p className="mt-1 break-words font-mono text-xs text-red-700 dark:text-red-400">{r.error}</p>
+                          </div>
+                        ) : (
+                          <div>
+                            <div className="text-xs font-medium uppercase tracking-wide text-zinc-500">Judge's reasoning</div>
+                            <p className="mt-1 text-sm">{r.judge_reasoning}</p>
+                          </div>
+                        )}
                         <div>
                           <div className="text-xs font-medium uppercase tracking-wide text-zinc-500">
                             Answer <span className="font-normal normal-case">· {r.api_calls} API calls, {r.tool_calls} tool calls, {r.seconds}s{r.stop !== "end_turn" ? `, stopped: ${r.stop}` : ""}</span>
                           </div>
                           <div className="prose-answer mt-1 text-sm"><ReactMarkdown remarkPlugins={[remarkGfm]}>{r.answer}</ReactMarkdown></div>
+                          {!!r.unseen_citations?.length && (
+                            <p className="mt-1 text-xs text-amber-700 dark:text-amber-400">Cited without having read: {r.unseen_citations.join(", ")}</p>
+                          )}
                         </div>
                       </div>
                     </td>

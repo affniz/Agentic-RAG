@@ -19,7 +19,7 @@ from typing import Any, Callable, Literal
 import anthropic
 from pydantic import BaseModel
 
-from .agent import AGENT_INSTRUCTIONS_V1, Answer, RagAgent, SearchOptions, Usage
+from .agent import AGENT_INSTRUCTIONS_V1, CITATION_RE, Answer, RagAgent, SearchOptions, Usage
 from .baseline import NaiveRag
 from .models import request_options
 from .store import KnowledgeBase
@@ -223,9 +223,15 @@ def answer_eval(
             raise EvalCancelled()
         system = make_system(sysname, kb, client, model, effort, today, naive_k, max_steps, search_k)  # fresh
         start = time.time()
-        ans: Answer = system.ask(q["question"])
-        elapsed = time.time() - start
-        verdict, judge_usage = judge(client, q, ans.text, judge_model)
+        ans: Answer | None = None
+        try:
+            ans = system.ask(q["question"])
+            elapsed = time.time() - start
+            verdict, judge_usage = judge(client, q, ans.text, judge_model)
+        except FATAL_API_ERRORS:
+            raise  # a bad key or permission fails every question: stop instead of erroring each one
+        except Exception as e:  # one failed question (rate limit, overload, ...) must not lose the run
+            return _error_row(q, sysname, rep, ans, time.time() - start, e)
         sources = q.get("sources", [])
         cited = all(re.search(rf"\[{re.escape(s)}#\d+\]", ans.text) for s in sources) if sources else None
         return {
@@ -238,6 +244,7 @@ def answer_eval(
             "verdict": verdict.verdict,
             "judge_reasoning": verdict.reasoning,
             "cited_expected_sources": cited,
+            "unseen_citations": unseen_citations(ans),
             "evidence_recall": _evidence_recall(kb, ans.retrieved, q.get("evidence", [])),
             "retrieved": ans.retrieved,
             "tool_calls": len(ans.tool_calls),
@@ -255,8 +262,9 @@ def answer_eval(
             rows.append(row)
             ev = "" if row["evidence_recall"] is None else f"  evidence={row['evidence_recall']:.0%}"
             run_tag = f" run {row['run']}" if repeats > 1 else ""
+            err = f"  {row['error']}" if row.get("error") else ""
             log(f"[{i}/{len(jobs)}]{run_tag} {row['system']:<10} {row['id']:<26} {row['verdict']:<17}"
-                f"tools={row['tool_calls']}{ev}  ${row['cost_usd']:.4f}  {row['seconds']}s")
+                f"tools={row['tool_calls']}{ev}  ${row['cost_usd']:.4f}  {row['seconds']}s{err}")
             if on_row:
                 on_row(i, len(jobs), row)
 
@@ -279,7 +287,33 @@ class EvalCancelled(Exception):
     """Raised by answer_eval when should_stop() turns true; nothing is saved."""
 
 
-RANGED = ("correct", "partially_correct", "evidence_recall", "cited_expected_sources")
+# Errors that would hit every question alike, so the run stops at once instead of recording one
+# error row per question.
+FATAL_API_ERRORS = (anthropic.AuthenticationError, anthropic.PermissionDeniedError, EvalCancelled)
+
+
+def _error_row(q: dict[str, Any], sysname: str, rep: int, ans: Answer | None, seconds: float,
+               e: Exception) -> dict[str, Any]:
+    """A question that failed with an error: kept in the results, left out of the accuracy metrics.
+    If the answer came back and only the judge failed, its text and cost are kept."""
+    return {
+        "id": q["id"], "category": q.get("category", "uncategorized"), "system": sysname, "run": rep + 1,
+        "question": q["question"], "answer": ans.text if ans else "", "verdict": "error",
+        "judge_reasoning": "", "error": f"{type(e).__name__}: {e}", "cited_expected_sources": None,
+        "unseen_citations": [],
+        "evidence_recall": None, "retrieved": ans.retrieved if ans else [],
+        "tool_calls": len(ans.tool_calls) if ans else 0, "api_calls": ans.usage.api_calls if ans else 0,
+        "usage": ans.usage.__dict__ if ans else {}, "cost_usd": (ans.cost_usd or 0.0) if ans else 0.0,
+        "judge_cost_usd": 0.0, "seconds": round(seconds, 1), "stop": "error",
+    }
+
+
+def unseen_citations(ans: Answer) -> list[str]:
+    """Citations of chunks the system never showed the model: guesses presented as evidence."""
+    return sorted({f"{s}#{i}" for s, i in CITATION_RE.findall(ans.text)} - set(ans.retrieved))
+
+
+RANGED = ("correct", "partially_correct", "evidence_recall", "cited_expected_sources", "cited_unseen")
 
 
 def combine_runs(rows: list[dict[str, Any]], repeats: int) -> dict[str, Any]:
@@ -290,22 +324,29 @@ def combine_runs(rows: list[dict[str, Any]], repeats: int) -> dict[str, Any]:
     out["judge_cost_usd"] = sum(r["judge_cost_usd"] for r in runs) / len(runs)
     out["runs"] = repeats
     out["range"] = {}
-    for key in RANGED:
-        vals = [r[key] for r in runs if r[key] is not None]
+    answered = [r for r, k in zip(runs, range(1, repeats + 1))
+                if any(row.get("run", 1) == k and row["verdict"] != "error" for row in rows)]
+    for key in RANGED:  # runs in which every question errored have no accuracy to range over
+        vals = [r[key] for r in answered if r[key] is not None]
         if vals:
             out["range"][key] = (min(vals), max(vals))
     for cat, stats in out["by_category"].items():
-        vals = [r["by_category"][cat]["correct"] for r in runs if cat in r["by_category"]]
+        vals = [r["by_category"][cat]["correct"] for r in answered if cat in r["by_category"]]
         stats["range"] = (min(vals), max(vals))
-        stats["n"] //= repeats  # questions in the category, not answers pooled over runs
+        # Questions in the category (errored ones included), not answers pooled over runs.
+        stats["n"] = len({r["id"] for r in rows if r["category"] == cat})
     verdicts: dict[str, set[str]] = defaultdict(set)
     for r in rows:
-        verdicts[r["id"]].add(r["verdict"])
+        if r["verdict"] != "error":
+            verdicts[r["id"]].add(r["verdict"])
     out["unstable"] = sorted(qid for qid, v in verdicts.items() if len(v) > 1)
     return out
 
 
-def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
+def summarize(all_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Accuracy and averages over the questions that ran; rows that failed with an error are
+    left out of them (and counted in `errors`), and only their spend is added to the cost."""
+    rows = [r for r in all_rows if r["verdict"] != "error"]
     n = len(rows) or 1
     by_cat: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for r in rows:
@@ -313,17 +354,20 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     with_src = [r for r in rows if r["cited_expected_sources"] is not None]
     with_ev = [r for r in rows if r["evidence_recall"] is not None]
     return {
+        "errors": len(all_rows) - len(rows),
         "correct": sum(r["verdict"] == "correct" for r in rows) / n,
         "partially_correct": sum(r["verdict"] == "partially_correct" for r in rows) / n,
         "by_category": {c: {"n": len(rs), "correct": sum(r["verdict"] == "correct" for r in rs) / len(rs)}
                         for c, rs in sorted(by_cat.items())},
         "cited_expected_sources": sum(bool(r["cited_expected_sources"]) for r in with_src) / len(with_src) if with_src else None,
         "evidence_recall": sum(r["evidence_recall"] for r in with_ev) / len(with_ev) if with_ev else None,
+        # Share of answers citing at least one chunk the system never showed the model (lower is better).
+        "cited_unseen": sum(bool(r.get("unseen_citations")) for r in rows) / n,
         "avg_tool_calls": sum(r["tool_calls"] for r in rows) / n,
         "avg_api_calls": sum(r["api_calls"] for r in rows) / n,
         "avg_seconds": sum(r["seconds"] for r in rows) / n,
-        "cost_usd": sum(r["cost_usd"] for r in rows),
-        "judge_cost_usd": sum(r["judge_cost_usd"] for r in rows),
+        "cost_usd": sum(r["cost_usd"] for r in all_rows),
+        "judge_cost_usd": sum(r["judge_cost_usd"] for r in all_rows),
     }
 
 
