@@ -75,14 +75,19 @@ export default function App() {
             refreshList();
             break;
           case "tool_call":
-            patchLast((t) => ({ ...t, steps: [...t.steps, { id: ev.id, name: ev.name, args: ev.args, status: "running" }] }));
+            patchLast((t) => ({ ...t, steps: [...t.steps, { id: ev.id, name: ev.name, args: ev.args, status: "running", step: ev.step }] }));
             break;
           case "tool_result":
             patchLast((t) => ({
               ...t,
-              steps: t.steps.map((s) => (s.id === ev.id ? { ...s, status: ev.is_error ? "error" : "done", chars: ev.chars, results: ev.results } : s)),
+              steps: t.steps.map((s) => (s.id === ev.id ? { ...s, status: ev.is_error ? "error" : "done", chars: ev.chars, results: ev.results, seconds: ev.seconds } : s)),
             }));
             break;
+          case "model_call": {
+            const { type: _, ...call } = ev;
+            patchLast((t) => ({ ...t, timings: [...(t.timings ?? []), call] }));
+            break;
+          }
           case "text_delta":
             patchLast((t) => ({ ...t, text: t.text + ev.text }));
             break;
@@ -223,7 +228,7 @@ export default function App() {
                     </div>
                   ) : (
                     <div key={i}>
-                      <Steps steps={t.steps} streaming={!!t.streaming} />
+                      <Steps steps={t.steps} timings={t.timings ?? []} streaming={!!t.streaming} />
                       {t.text || !t.streaming ? <Answer turn={t} onCite={setCite}
                         onFeedback={t.id && !t.streaming ? (r, c) => giveFeedback(t.id!, r, c) : undefined} />
                         : !t.steps.length && <div className="flex items-center gap-2 text-sm text-zinc-500">{Icon.spinner()} Thinking…</div>}

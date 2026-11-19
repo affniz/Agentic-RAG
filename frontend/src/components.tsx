@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { api } from "./api";
-import type { ChunkView, Citation, ConversationSummary, Feedback, Health, Step, Turn } from "./types";
+import type { ChunkView, Citation, ConversationSummary, Feedback, Health, ModelCall, Step, Turn } from "./types";
 
 // ---------------------------------------------------------------- icons
 
@@ -144,9 +144,50 @@ function stepLabel(s: Step): { icon: ReactNode; text: ReactNode } {
   return { icon: Icon.list(), text: s.name };
 }
 
-export function Steps({ steps, streaming }: { steps: Step[]; streaming: boolean }) {
+const secs = (s: number) => (s < 1 ? `${Math.round(s * 1000)} ms` : `${s.toFixed(1)}s`);
+
+function StepRow({ s }: { s: Step }) {
+  const { icon, text } = stepLabel(s);
+  return (
+    <li className="flex items-start gap-2 text-sm text-zinc-500">
+      <span className="mt-0.5 shrink-0">{icon}</span>
+      <span className="min-w-0 flex-1">{text}</span>
+      {s.seconds != null && <span className="mt-0.5 shrink-0 text-xs tabular-nums text-zinc-400">{secs(s.seconds)}</span>}
+      <span className="mt-0.5 shrink-0">
+        {s.status === "running" ? Icon.spinner("h-3.5 w-3.5")
+          : s.status === "error" ? <span className="text-red-500">{Icon.alert("h-3.5 w-3.5")}</span>
+          : <span className="text-emerald-600">{Icon.check("h-3.5 w-3.5")}</span>}
+      </span>
+    </li>
+  );
+}
+
+/** A model call in the trace: how long it took, and how much of that was waiting for the API to start answering. */
+function CallRow({ c }: { c: ModelCall }) {
+  const waited = c.wait_seconds >= 1 && c.wait_seconds / Math.max(c.seconds, 0.01) >= 0.3;
+  return (
+    <li className="flex items-start gap-2 text-xs text-zinc-400">
+      <span className="min-w-0 flex-1">
+        Model call {c.step}{c.output_tokens != null && <> · {c.output_tokens.toLocaleString()} tokens out</>}
+        {waited && <> · waited {secs(c.wait_seconds)} for the API to start</>}
+        {!!c.retries && <span className="text-amber-700 dark:text-amber-400"> · retried {c.retries}×</span>}
+      </span>
+      <span className="shrink-0 tabular-nums">{secs(c.seconds)}</span>
+    </li>
+  );
+}
+
+export function Steps({ steps, timings = [], streaming }: { steps: Step[]; timings?: ModelCall[]; streaming: boolean }) {
   const [open, setOpen] = useState(false);
   if (steps.length === 0) return null;
+  // Group tools under the model call that asked for them; answers saved before timings existed have neither.
+  const grouped = timings.length > 0 && steps.every((s) => s.step != null);
+  const model = timings.reduce((a, c) => a + c.seconds, 0);
+  const waiting = timings.reduce((a, c) => a + c.wait_seconds, 0);
+  const retries = timings.reduce((a, c) => a + (c.retries ?? 0), 0);
+  const tools = new Map<number, number>();  // step -> its slowest tool (they run in parallel)
+  steps.forEach((s) => { if (s.step != null) tools.set(s.step, Math.max(tools.get(s.step) ?? 0, s.seconds ?? 0)); });
+  const toolTime = [...tools.values()].reduce((a, b) => a + b, 0);
   const running = steps.some((s) => s.status === "running");
   const searches = steps.filter((s) => s.name === "search_knowledge_base").length;
   const reads = steps.filter((s) => s.name === "read_chunks").length;
@@ -162,21 +203,20 @@ export function Steps({ steps, streaming }: { steps: Step[]; streaming: boolean 
       </button>
       {expanded && (
         <ol className="mt-2 space-y-1.5 border-l border-zinc-200 pl-4 dark:border-zinc-800">
-          {steps.map((s) => {
-            const { icon, text } = stepLabel(s);
-            return (
-              <li key={s.id} className="flex items-start gap-2 text-sm text-zinc-500">
-                <span className="mt-0.5 shrink-0">{icon}</span>
-                <span className="min-w-0 flex-1">{text}</span>
-                <span className="mt-0.5 shrink-0">
-                  {s.status === "running" ? Icon.spinner("h-3.5 w-3.5")
-                    : s.status === "error" ? <span className="text-red-500">{Icon.alert("h-3.5 w-3.5")}</span>
-                    : <span className="text-emerald-600">{Icon.check("h-3.5 w-3.5")}</span>}
-                </span>
-              </li>
-            );
-          })}
+          {grouped
+            ? timings.map((c) => [
+                <CallRow key={`call-${c.step}`} c={c} />,
+                ...steps.filter((s) => s.step === c.step).map((s) => <StepRow key={s.id} s={s} />),
+              ])
+            : steps.map((s) => <StepRow key={s.id} s={s} />)}
         </ol>
+      )}
+      {expanded && !streaming && timings.length > 0 && (
+        <p className="mt-2 pl-4 text-xs text-zinc-400">
+          Model {secs(model)}{waiting >= 1 && <> (of which {secs(waiting)} waiting for the API to start)</>}
+          {grouped && <> · tools {secs(toolTime)}</>}
+          {retries > 0 && <span className="text-amber-700 dark:text-amber-400"> · {retries} automatic retr{retries === 1 ? "y" : "ies"} (rate limit or overload)</span>}
+        </p>
       )}
     </div>
   );

@@ -18,7 +18,7 @@ question ─► Claude (claude-haiku-5-5) ──tool calls──► list_documen
 | File | Role |
 |---|---|
 | `rag/store.py` | Loads `.md` / `.txt` / `.pdf`; heading-aware chunking (each chunk knows its Markdown section path); incremental per-chunk indexing (content-hashed chunk ids, so an edit only re-embeds the chunks it changed) into ChromaDB (local all-MiniLM-L6-v2 ONNX embeddings) + BM25; hybrid search with Reciprocal Rank Fusion; optional local cross-encoder reranking |
-| `rag/agent.py` | The agent loop: strict tool schemas, parallel tool execution, multi-turn memory, step limit, refusal / `max_tokens` handling, event callbacks, per-question cost tracking |
+| `rag/agent.py` | The agent loop: strict tool schemas, parallel tool execution (one step's tool calls run concurrently), per-call timing, multi-turn memory, step limit, refusal / `max_tokens` handling, event callbacks, per-question cost tracking |
 | `rag/evaluate.py` | Retrieval metrics, and answer grading that compares the agent with the one-shot baseline per question category |
 | `rag/baseline.py` | One-shot RAG baseline (retrieve once, answer once) for comparison |
 | `rag/models.py` | Model prices (incl. Haiku's long-prompt tier) and per-model request options such as the refusal fallback |
@@ -62,6 +62,8 @@ python main.py chat                        # multi-turn; /reset, /cost, /quit
 Four screens, all in the sidebar. Works on mobile and in dark mode.
 
 **Chat** - streaming answers; a collapsible trace of the agent's steps ("Searched 'carry over' → 3 results",
+with how long each model call and tool took, how much of a model call was spent waiting for the API to start answering,
+and any automatic retries after rate limits or overloads,
 "Read benefits.md #3-5"); numbered citation chips that open the cited chunk with its section path and
 neighbours in a side panel; estimated cost, API calls and time under each answer; 👍/👎 buttons (a 👎
 asks what the answer should have been); a conversation list with **New chat** and **Reset** (deletes all
