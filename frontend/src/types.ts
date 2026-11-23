@@ -57,6 +57,8 @@ export type ConversationSummary = {
   model: string;
 };
 
+export type AuthStatus = { required: boolean; authenticated: boolean };
+
 export type Health = {
   documents: number;
   chunks: number;

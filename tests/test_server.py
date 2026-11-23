@@ -279,3 +279,111 @@ def test_message_content_serialization():
     assert blocks[3] == {"type": "text", "text": "fake", "extra": {"a": [1]}}
     with pytest.raises(TypeError):
         jsonable(object())
+
+
+# ---------------------------------------------------------------- login (RAG_PASSWORD)
+
+PASSWORD = "correct horse battery staple"
+
+
+@pytest.fixture
+def locked(client, monkeypatch):
+    """The app with RAG_PASSWORD set (same data folders as `client`)."""
+    import server.app as app_module
+
+    monkeypatch.setenv("RAG_PASSWORD", PASSWORD)
+    app_module = importlib.reload(app_module)
+    app_module.client.delay = 0
+    return TestClient(app_module.app)
+
+
+def login(c, password=PASSWORD, **headers):
+    return c.post("/api/auth/login", json={"password": password}, headers=headers)
+
+
+def test_without_password_nothing_changes(client):
+    assert client.get("/api/auth/status").json() == {"required": False, "authenticated": True}
+    assert client.get("/api/conversations").status_code == 200
+    assert login(client).status_code == 400
+
+
+def test_api_needs_login(locked):
+    assert locked.get("/api/auth/status").json() == {"required": True, "authenticated": False}
+    for method, path in [("GET", "/api/health"), ("GET", "/api/conversations"), ("GET", "/api/documents"),
+                         ("GET", "/api/evals/runs"), ("PUT", "/api/settings"), ("DELETE", "/api/conversations"),
+                         ("GET", "/api/search?q=x"), ("GET", "/api/nope")]:
+        assert locked.request(method, path).status_code == 401, path
+    r = locked.post("/api/chat", json={"message": "hi"})
+    assert r.status_code == 401 and r.json() == {"detail": "login required"}
+    assert locked.get("/api/ping").json() == {"ok": True}  # Docker's HEALTHCHECK
+
+
+def test_login_logout_roundtrip(locked):
+    r = login(locked, "wrong")
+    assert r.status_code == 401 and "rag_session" not in r.cookies
+    r = login(locked)
+    assert r.status_code == 200
+    cookie = r.headers["set-cookie"].lower()
+    assert "httponly" in cookie and "samesite=strict" in cookie and "secure" not in cookie  # plain http here
+    assert locked.get("/api/auth/status").json()["authenticated"]
+    assert locked.get("/api/health").status_code == 200
+    assert events(locked.post("/api/chat", json={"message": "carry over"}))[-1]["type"] == "done"
+
+    assert locked.post("/api/auth/logout").status_code == 200
+    assert locked.get("/api/health").status_code == 401
+
+
+def test_forged_expired_and_rotated_sessions_are_rejected(locked, monkeypatch):
+    import server.app as app_module
+
+    auth = app_module.auth
+    token = auth.make_token()
+    assert auth.valid(token)
+    expires, nonce, sig = token.split(".")
+    assert not auth.valid(f"{int(expires) + 999}.{nonce}.{sig}")  # edited expiry
+    assert not auth.valid(f"{expires}.{nonce}.{'0' * len(sig)}")
+    assert not auth.valid("garbage") and not auth.valid("") and not auth.valid(None)
+    assert not auth.valid(auth.make_token(now=0))  # expired long ago
+    locked.cookies.set("rag_session", f"{int(expires) + 999}.{nonce}.{sig}")
+    assert locked.get("/api/health").status_code == 401
+
+    # A restart keeps sessions (same secret file); a new password logs everyone out.
+    locked.cookies.clear()
+    login(locked)
+    app_module = importlib.reload(app_module)
+    assert TestClient(app_module.app, cookies=locked.cookies).get("/api/health").status_code == 200
+    monkeypatch.setenv("RAG_PASSWORD", "a different long password")
+    app_module = importlib.reload(app_module)
+    assert TestClient(app_module.app, cookies=locked.cookies).get("/api/health").status_code == 401
+
+
+def test_failed_logins_are_limited(locked):
+    from server import auth as auth_module
+
+    for _ in range(auth_module.MAX_FAILURES):
+        assert login(locked, "nope").status_code == 401
+    r = login(locked)  # even the right password waits
+    assert r.status_code == 429 and int(r.headers["retry-after"]) > 0
+
+
+def test_lockout_expires(tmp_path):
+    from server.auth import FAILURE_WINDOW, MAX_FAILURES, Auth
+
+    auth = Auth(PASSWORD, tmp_path / "key")
+    for _ in range(MAX_FAILURES):
+        auth.record_failure("1.2.3.4", now=1000)
+    assert auth.retry_after("1.2.3.4", now=1001) > 0 and auth.retry_after("5.6.7.8", now=1001) == 0
+    assert auth.retry_after("1.2.3.4", now=1000 + FAILURE_WINDOW + 1) == 0
+    assert (tmp_path / "key").stat().st_mode & 0o777 == 0o600
+
+
+def test_password_allows_any_host_but_not_cross_site(locked):
+    assert login(locked, Host="rag.lan:8000", Origin="http://rag.lan:8000").status_code == 200
+    assert locked.get("/api/health", headers={"Host": "rag.lan:8000"}).status_code == 200
+    assert locked.post("/api/chat", json={"message": "x", "model": "gpt-4"},
+                       headers={"Host": "rag.lan", "Origin": "http://rag.lan:8000"}).status_code == 400
+    # Writes from another site are still refused, logged in or not.
+    for headers in [{"Origin": "http://evil.example"}, {"Sec-Fetch-Site": "cross-site"}]:
+        r = locked.post("/api/chat", json={"message": "hi"}, headers={"Host": "rag.lan", **headers})
+        assert r.status_code == 403, headers
+        assert login(locked, Host="rag.lan", **headers).status_code == 403

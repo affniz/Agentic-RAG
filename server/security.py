@@ -11,6 +11,11 @@ header. Keep the port on loopback (uvicorn's default; `-p 127.0.0.1:8000:8000` w
 
 Only hostnames are compared, never ports, so the Vite dev proxy (:5173 -> :8000) keeps working.
 RAG_ALLOWED_HOSTS adds hostnames, comma-separated (e.g. a LAN name you serve the UI under).
+
+With a login password (RAG_PASSWORD, server/auth.py) the Host check is dropped (`any_host=True`):
+the session cookie is what keeps other people and DNS-rebinding pages out, since a rebound page is on
+another hostname and the browser won't send it the cookie. The cross-site checks stay; an `Origin`
+must then match an allowed hostname or the request's own Host.
 """
 
 from __future__ import annotations
@@ -51,9 +56,10 @@ def host_header_name(value: str) -> str:
 class LocalhostGuard:
     """ASGI middleware that answers 403 to requests from outside this machine's own pages."""
 
-    def __init__(self, app: ASGIApp, allowed: frozenset[str] | None = None):
+    def __init__(self, app: ASGIApp, allowed: frozenset[str] | None = None, any_host: bool = False):
         self.app = app
         self.allowed = allowed if allowed is not None else allowed_hosts_from_env()
+        self.any_host = any_host
 
     def is_allowed(self, host: str | None) -> bool:
         return bool(host) and (host in self.allowed or host.endswith(".localhost"))
@@ -64,14 +70,17 @@ class LocalhostGuard:
         # Starlette's TestClient sends `Host: testserver` from client "testclient"; a real server
         # always reports the peer's IP address there, so this can't be reached over the network.
         in_process_test = host == "testserver" and (scope.get("client") or ("",))[0] == "testclient"
-        if not (self.is_allowed(host) or in_process_test):
+        if not (self.any_host or self.is_allowed(host) or in_process_test):
             return f"host {host or '(none)'!r} is not allowed (set RAG_ALLOWED_HOSTS to add it)"
         if scope["type"] == "websocket" or scope.get("method", "GET").upper() in UNSAFE_METHODS:
             if headers.get("sec-fetch-site", "").lower() == "cross-site":
                 return "cross-site request blocked"
             origin = headers.get("origin")
-            if origin is not None and not self.is_allowed(_origin_host(origin)):
-                return f"origin {origin!r} is not allowed"
+            if origin is not None:
+                origin_host = _origin_host(origin)
+                same_host = self.any_host and origin_host is not None and origin_host == host
+                if not (self.is_allowed(origin_host) or same_host):
+                    return f"origin {origin!r} is not allowed"
         return None
 
     async def __call__(self, scope: Scope, receive: Any, send: Any) -> None:

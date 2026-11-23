@@ -65,6 +65,7 @@ export function Sidebar(props: {
   onNew: () => void;
   onDelete: (id: string) => void;
   onReset: () => void;
+  onLogout?: () => void;
 }) {
   const { conversations, activeId, health } = props;
   return (
@@ -122,6 +123,11 @@ export function Sidebar(props: {
             )}
           </div>
         ) : "Connecting…"}
+        {props.onLogout && (
+          <button onClick={props.onLogout} className="mt-2 font-medium text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100">
+            Log out
+          </button>
+        )}
       </div>
     </div>
   );
