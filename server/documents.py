@@ -1,5 +1,5 @@
 """Document management API: list, upload, delete, re-index and per-file transcription (background jobs
-with progress), search tester."""
+with progress), Google Drive sync, search tester."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import hashlib
 import re
 import threading
 import time
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -15,12 +16,16 @@ from pydantic import BaseModel
 
 from pypdf import PdfReader
 
+from rag import gdrive
 from rag.store import SEARCH_MODES, SUPPORTED, KnowledgeBase
 
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 # Rough Claude Haiku cost of transcribing one PDF page (~1.6k input + ~0.6k output tokens).
 EST_USD_PER_PAGE = 0.0005
 Transcriber = Callable[[Path], str]
+Progress = Callable[[str, int, int], None]
+# Runs before an ingest (a transcription, a Drive sync); may return fields to add to the job's final state.
+BeforeFn = Callable[[Progress], dict[str, Any] | None]
 _NAME_OK = re.compile(r"^[^/\\\x00-\x1f]+$")
 
 
@@ -37,7 +42,7 @@ class IngestJob:
         self.state: dict[str, Any] = {"state": "idle"}
 
     def start(self, rebuild: bool = False, reason: str = "manual", force: tuple[str, ...] = (),
-              before: Callable[[], None] | None = None, file: str | None = None) -> dict[str, Any]:
+              before: BeforeFn | None = None, file: str | None = None) -> dict[str, Any]:
         """Run `before` (e.g. a transcription), then an ingest, in a background thread."""
         if not self._lock.acquire(blocking=False):
             raise HTTPException(409, "indexing is already running - try again when it finishes")
@@ -52,7 +57,7 @@ class IngestJob:
             self._pending = reason
             return self.state
 
-    def _launch(self, rebuild: bool, reason: str, force: tuple[str, ...], before: Callable[[], None] | None,
+    def _launch(self, rebuild: bool, reason: str, force: tuple[str, ...], before: BeforeFn | None,
                 file: str | None) -> dict[str, Any]:
         """Start the job thread; the caller holds _lock, which the thread releases."""
         self._set_running(reason, rebuild, file)
@@ -63,13 +68,15 @@ class IngestJob:
         self.state = {"state": "running", "stage": "starting", "done": 0, "total": 0, "reason": reason,
                       "rebuild": rebuild, "file": file, "started_at": time.time()}
 
-    def _run(self, rebuild: bool, force: tuple[str, ...], before: Callable[[], None] | None) -> None:
+    def _run(self, rebuild: bool, force: tuple[str, ...], before: BeforeFn | None) -> None:
+        carried: dict[str, Any] = {}  # what `before` returned (e.g. a Drive sync report), kept across passes
         while True:
             result = self._pass(rebuild, force, before)
+            carried.update({k: v for k, v in result.items() if k not in ("state", "report", "error")})
             with self._guard:
                 if self._pending is None:
                     # Published only now, so pollers never see "done" between two passes.
-                    self.state.update(result, finished_at=time.time())
+                    self.state.update(carried, **result, finished_at=time.time())
                     self._lock.release()
                     return
                 reason, self._pending = self._pending, None
@@ -77,17 +84,15 @@ class IngestJob:
             rebuild, force, before = False, (), None
             self._set_running(reason, False, None)
 
-    def _pass(self, rebuild: bool, force: tuple[str, ...], before: Callable[[], None] | None) -> dict[str, Any]:
+    def _pass(self, rebuild: bool, force: tuple[str, ...], before: BeforeFn | None) -> dict[str, Any]:
         """Run one ingest; return the final state fields (not yet applied to self.state)."""
         def progress(stage: str, done: int, total: int) -> None:
             self.state.update(stage=stage, done=done, total=total)
 
         try:
-            if before is not None:
-                progress("transcribing", 0, 1)
-                before()
+            extra = (before(progress) or {}) if before is not None else {}
             r = self.kb.ingest(self.docs_dir, rebuild=rebuild, on_progress=progress, force=force)
-            return {"state": "done", "report": {"added": r.added, "updated": r.updated, "removed": r.removed,
+            return {**extra, "state": "done", "report": {"added": r.added, "updated": r.updated, "removed": r.removed,
                                                 "unchanged": r.unchanged, "chunks": r.chunks, "empty": r.empty,
                                                 "failed": r.failed, "embedded": r.embedded}}
         except Exception as e:  # surfaced in the UI
@@ -102,6 +107,15 @@ class IngestRequest(BaseModel):
     rebuild: bool = False
 
 
+@dataclass
+class DriveSync:
+    """A Google Drive folder mirrored into `dest` (a folder inside the documents folder)."""
+
+    folder: str  # folder id
+    dest: Path
+    session: Callable[[], gdrive.Session]  # created on first use, so a bad key only fails the sync
+
+
 def _file_digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -113,8 +127,10 @@ def _pdf_pages(path: Path) -> int | None:
         return None
 
 
-def make_router(kb: KnowledgeBase, docs_dir: Path, transcriber: Callable[[], Transcriber]) -> APIRouter:
-    """transcriber: returns the function that turns a PDF into text (created on first use)."""
+def make_router(kb: KnowledgeBase, docs_dir: Path, transcriber: Callable[[], Transcriber],
+                drive: DriveSync | None = None) -> APIRouter:
+    """transcriber: returns the function that turns a PDF into text (created on first use).
+    drive: the Google Drive folder that POST /api/gdrive/sync mirrors, if one is configured."""
     docs_dir.mkdir(parents=True, exist_ok=True)
     root = docs_dir.resolve()
     job = IngestJob(kb, docs_dir)
@@ -171,7 +187,10 @@ def make_router(kb: KnowledgeBase, docs_dir: Path, transcriber: Callable[[], Tra
                   "indexed_at": indexed_at.get(rel), "error": None, "chunks": counts.get(rel, 0), "status": "deleted", "pages": None, "transcribed": False,
                   "transcribe_cost_usd": None} for rel in sorted(indexed) if rel not in on_disk]
         return {"documents": rows, "chunks": len(kb.chunks), "ingest": ingest_state, "ocr": kb.pdf_ocr is not None,
-                "needs_ingest": any(r["status"] not in ("indexed", "empty", "error") for r in rows)}
+                "needs_ingest": any(r["status"] not in ("indexed", "empty", "error") for r in rows),
+                "gdrive": None if drive is None else {
+                    "folder": drive.folder, "dir": str(drive.dest.relative_to(docs_dir)),
+                    "last_sync": gdrive.last_sync(drive.dest)}}
 
     @router.post("/documents")
     async def upload(files: list[UploadFile], overwrite: bool = False) -> dict[str, Any]:
@@ -216,7 +235,8 @@ def make_router(kb: KnowledgeBase, docs_dir: Path, transcriber: Callable[[], Tra
         """Send one PDF to Claude for transcription, then re-index it. Runs in the background."""
         path = existing_pdf(name)
 
-        def run() -> None:
+        def run(progress: Progress) -> None:
+            progress("transcribing", 0, 1)
             if not kb.transcribe(path, transcriber()):
                 raise RuntimeError("Claude returned no text for this file - see the server log for details")
 
@@ -253,6 +273,18 @@ def make_router(kb: KnowledgeBase, docs_dir: Path, transcriber: Callable[[], Tra
             raise HTTPException(404, "no indexed chunks for this document")
         return {"name": name, "doc_note": next((c.doc_note for c in chunks if c.doc_note), ""),
                 "chunks": [{"index": c.index, "section": c.section, "text": c.text} for c in chunks]}
+
+    @router.post("/gdrive/sync")
+    def gdrive_sync() -> dict[str, Any]:
+        """Mirror the configured Drive folder into the documents folder, then index what changed."""
+        if drive is None:
+            raise HTTPException(404, "Google Drive isn't configured - set RAG_GDRIVE_FOLDER and restart the server")
+
+        def run(progress: Progress) -> dict[str, Any]:
+            report = gdrive.sync_folder(drive.session(), drive.folder, drive.dest, on_progress=progress)
+            return {"sync": asdict(report)}
+
+        return job.start(reason="gdrive", before=run)
 
     @router.get("/ingest")
     def ingest_status() -> dict[str, Any]:

@@ -6,7 +6,10 @@
               RAG_OCR=1 (transcribe scanned PDFs with Claude automatically),
               RAG_DATA (settings, feedback, conversations; default ./.rag_data), RAG_EVALS (eval sets, default ./evals),
               RAG_ALLOWED_HOSTS (extra hostnames the API answers to, comma-separated; see server/security.py),
-              RAG_PASSWORD (require a login; see server/auth.py)
+              RAG_PASSWORD (require a login; see server/auth.py),
+              RAG_GDRIVE_FOLDER (a Google Drive folder id or URL to sync documents from; see rag/gdrive.py),
+              RAG_GDRIVE_CREDENTIALS (service account key file; default: Application Default Credentials),
+              RAG_GDRIVE_DIR (where in RAG_DOCS the Drive files go, default "gdrive")
 
 Chat responses stream as Server-Sent Events. Settings, 👍/👎 feedback and conversations are saved in
 RAG_DATA, so chats survive a restart. Run a single uvicorn worker per RAG_DATA folder.
@@ -17,6 +20,7 @@ any hostname is accepted and every API route needs a login (server/auth.py).
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import os
@@ -37,7 +41,7 @@ from rag.store import KnowledgeBase
 from server import auth as auth_module
 from server import evals
 from server.conversations import ConversationStore
-from server.documents import make_router
+from server.documents import DriveSync, make_router
 from server.feedback import FeedbackStore, Settings, SettingsStore, export_eval_set
 from server.security import LocalhostGuard
 
@@ -80,8 +84,23 @@ def _transcriber() -> Any:
     return claude_pdf_transcriber()
 
 
+def _drive_sync() -> DriveSync | None:
+    """The Google Drive folder to sync from (RAG_GDRIVE_FOLDER), mirrored into RAG_DOCS/RAG_GDRIVE_DIR."""
+    folder = os.environ.get("RAG_GDRIVE_FOLDER", "").strip()
+    if not folder:
+        return None
+    from rag import gdrive
+
+    dest = (DOCS_DIR / os.environ.get("RAG_GDRIVE_DIR", "gdrive")).resolve()
+    if not dest.is_relative_to(DOCS_DIR.resolve()) or dest == DOCS_DIR.resolve():
+        raise RuntimeError("RAG_GDRIVE_DIR must be a subfolder of the documents folder (RAG_DOCS)")
+    credentials = os.environ.get("RAG_GDRIVE_CREDENTIALS") or None
+    return DriveSync(gdrive.folder_id(folder), DOCS_DIR / dest.relative_to(DOCS_DIR.resolve()),
+                     functools.cache(lambda: gdrive.drive_session(credentials)))
+
+
 kb = KnowledgeBase(INDEX_DIR, rerank=RERANK, pdf_ocr=_make_ocr())
-app.include_router(make_router(kb, DOCS_DIR, _transcriber))
+app.include_router(make_router(kb, DOCS_DIR, _transcriber, _drive_sync()))
 
 
 def _make_client() -> Any:

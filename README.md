@@ -20,6 +20,7 @@ question ─► Claude (claude-haiku-5-5) ──tool calls──► list_documen
 | `rag/store.py` | Loads `.md` / `.txt` / `.pdf`; heading-aware chunking (each chunk knows its Markdown section path); incremental per-chunk indexing (content-hashed chunk ids, so an edit only re-embeds the chunks it changed) into ChromaDB (local all-MiniLM-L6-v2 ONNX embeddings) + BM25; hybrid search with Reciprocal Rank Fusion; optional local cross-encoder reranking |
 | `rag/agent.py` | The agent loop: strict tool schemas, parallel tool execution (one step's tool calls run concurrently), per-call timing, multi-turn memory, step limit, refusal / `max_tokens` handling, event callbacks, per-question cost tracking |
 | `rag/evaluate.py` | Retrieval metrics, and answer grading that compares the agent with the one-shot baseline per question category |
+| `rag/gdrive.py` | Google Drive connector: mirrors a Drive folder into `docs/gdrive/` (Google Docs as Markdown, Slides as text, PDFs / `.md` / `.txt` as they are), so the normal ingest indexes it |
 | `rag/baseline.py` | One-shot RAG baseline (retrieve once, answer once) for comparison |
 | `rag/models.py` | Model prices (incl. Haiku's long-prompt tier) and per-model request options such as the refusal fallback |
 | `evals/basic`, `evals/hard`, `evals/holdout` | Eval sets: questions with evidence snippets, expected sources and reference answers, plus the hard set's own documents |
@@ -54,6 +55,43 @@ python main.py chat                        # multi-turn; /reset, /cost, /quit
 
 `ask` / `chat` take `--model` (`claude-haiku-5-5` default, `claude-sonnet-5-5`, `claude-opus-5-5`),
 `--effort` (`low` … `max`, default `medium`) and `-q` to hide the tool trace and cost line.
+
+## Google Drive
+
+Documents can come from a Google Drive folder (and its subfolders). The connector mirrors the folder into
+`docs/gdrive/`, then the normal ingest indexes it, so only new or changed files are downloaded and re-embedded.
+
+- **Google Docs** are exported as Markdown (headings become section paths), **Google Slides** as plain text,
+  and **PDFs, `.md` and `.txt`** files are downloaded as they are. Sheets, images, Office files and shortcuts
+  are skipped and listed in the sync report. Files over 50 MB are skipped.
+- Deleting, trashing or moving a file out of the folder in Drive removes it locally on the next sync; a
+  rename replaces the old copy. Only files the connector downloaded are ever deleted (tracked in
+  `docs/gdrive/.gdrive.json`). A file that fails to download keeps its previous copy and is retried next time.
+- Access is read-only (`drive.readonly` scope).
+
+**Credentials.** Either a service account (best for the server and Docker):
+
+1. In Google Cloud, enable the Google Drive API and create a service account with a JSON key.
+2. Share the Drive folder with the service account's `client_email` (Viewer is enough).
+
+or your own account, through Application Default Credentials:
+
+```bash
+gcloud auth application-default login --scopes=https://www.googleapis.com/auth/drive.readonly,https://www.googleapis.com/auth/cloud-platform
+```
+
+**Sync from the CLI** (the folder is its id or its URL from the browser):
+
+```bash
+python main.py gdrive "https://drive.google.com/drive/folders/1AbC..." --credentials key.json   # sync, then ingest docs/
+```
+
+`--no-ingest` only downloads; `--dir` changes the subfolder of `docs/`.
+
+**Sync from the web UI:** start the server with `RAG_GDRIVE_FOLDER` (id or URL) and, for a service account,
+`RAG_GDRIVE_CREDENTIALS=key.json`. The Documents screen then has a **Sync Google Drive** button that downloads
+the changes, indexes them and shows what was downloaded, removed or skipped. Synced files appear in the file
+list under `gdrive/`. `RAG_GDRIVE_DIR` changes the subfolder (it must be inside `RAG_DOCS`).
 
 ## Web UI
 
@@ -102,7 +140,7 @@ models without touching chat. Each run records the settings it used.
   http://localhost:5173 (API calls are proxied to :8000).
 - **Scanned PDFs** (images of pages, no text layer) can't be read by the text extractor; they show as "No text found". Click **Transcribe** on the file (or **Transcribe with Claude** in the document viewer, which also works for PDFs whose text layer is junk): after a confirmation showing what's sent and the estimated cost, Claude Haiku transcribes the page images and the file is re-indexed. Each file is sent once (the transcription is cached in the index folder; deleting the file, or replacing it with a new version, deletes its transcription), and "Use the PDF's own text instead" undoes it. To transcribe text-less PDFs automatically - e.g. a large folder - start the server with `RAG_OCR=1` or run `python main.py ingest --ocr`.
 - **Encrypted PDFs** that open without a password (common for official documents) are read normally. A PDF that needs a password, or any file that can't be read, is skipped with the reason shown in the Documents table; the rest of the folder is still indexed.
-- Other settings: `RAG_DOCS` (documents folder, default `./docs`), `RAG_INDEX` (index directory), `RAG_RERANK=0` (turn off the reranker), `RAG_DATA` (settings, feedback and eval-set indexes, default `./.rag_data`), `RAG_EVALS` (eval sets and results, default `./evals`).
+- Other settings: `RAG_DOCS` (documents folder, default `./docs`), `RAG_INDEX` (index directory), `RAG_RERANK=0` (turn off the reranker), `RAG_DATA` (settings, feedback and eval-set indexes, default `./.rag_data`), `RAG_EVALS` (eval sets and results, default `./evals`), `RAG_GDRIVE_FOLDER` / `RAG_GDRIVE_CREDENTIALS` / `RAG_GDRIVE_DIR` (see *Google Drive*).
 - Conversations, settings and feedback are saved in `RAG_DATA` (`conversations/<id>.json`), so chats survive a restart. Run a single uvicorn worker per `RAG_DATA` folder, or the processes overwrite each other's files.
 - **Local only:** the server answers only requests addressed to `localhost` / `127.0.0.1` / `[::1]` / `*.localhost`, and refuses writes from other sites (cross-site `Origin` or `Sec-Fetch-Site`), so a web page you visit can't upload, delete or start paid evals. This protects against browsers, not the network: a client that can reach the port can send any `Host` header. Without a password there is no login, so keep the port on loopback (`uvicorn` binds to 127.0.0.1 by default; for Docker see below). `RAG_ALLOWED_HOSTS` adds hostnames (comma-separated). See `server/security.py`.
 - **Login:** set `RAG_PASSWORD` to require a password: the UI shows a sign-in screen, every API route except the login itself answers 401 without a session, and the sidebar gets **Log out**. With a password set, any hostname is accepted (so you can open it from another device), and writes from other sites are still refused. Sessions are signed cookies (HttpOnly, SameSite=Strict, 30 days) keyed by a secret in `RAG_DATA/session_key`, so they survive restarts. Changing the password, or deleting that file, logs every browser out. After 10 wrong passwords from one address, it must wait 15 minutes. Over plain HTTP the password crosses the network unencrypted, so for anything beyond your own LAN put a TLS proxy in front and run uvicorn with `--proxy-headers` (the cookie is then marked Secure). See `server/auth.py`.
@@ -126,6 +164,8 @@ docker run -p 127.0.0.1:8000:8000 -e ANTHROPIC_API_KEY -v rag-data:/data agentic
   can be published on your network: everything but the sign-in screen needs the password (see *Login* above).
 - **Demo mode** (no API key, real search, fake model): `docker run -p 127.0.0.1:8000:8000 -e RAG_FAKE_LLM=1 agentic-rag`.
 - **Your documents:** mount them over the samples with `-v /path/to/docs:/app/docs`, then click **Re-index** on the Documents screen.
+- **Google Drive:** `-e RAG_GDRIVE_FOLDER=<folder id or URL> -e RAG_GDRIVE_CREDENTIALS=/secrets/key.json -v /path/to/key.json:/secrets/key.json:ro`,
+  then click **Sync Google Drive** (see *Google Drive* above). Mount a `docs` volume too if the synced files should survive a container rebuild.
 - **What persists:** the index, settings, feedback and chat conversations live in the `/data` volume. Eval results are written inside the container.
 - **Build without the reranker** (e.g. where Hugging Face is unreachable): `--build-arg BAKE_RERANKER=0`; it is then downloaded on first use, and search works without it if that fails.
 - **Other hostnames:** without a password the server only answers requests addressed to localhost (see *Local only* above). To open it under another name, e.g. on a home server, set `RAG_PASSWORD` (any hostname then works), or add `-e RAG_ALLOWED_HOSTS=myhost` - without a password anyone who can reach the port can use your API key.
