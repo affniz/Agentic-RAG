@@ -7,7 +7,10 @@
               RAG_DATA (settings, feedback, conversations; default ./.rag_data), RAG_EVALS (eval sets, default ./evals),
               RAG_ALLOWED_HOSTS (extra hostnames the API answers to, comma-separated; see server/security.py),
               RAG_PASSWORD (require a login; see server/auth.py),
-              RAG_GDRIVE_FOLDER (a Google Drive folder id or URL to sync documents from; see rag/gdrive.py),
+              RAG_GDRIVE_FOLDER (a Google Drive folder id or URL to sync documents from; see rag/gdrive.py;
+                without it, Drive is connected from the Documents screen - see server/gdrive_connect.py),
+              RAG_GDRIVE_CLIENT_ID / RAG_GDRIVE_CLIENT_SECRET (the OAuth client for "Connect Google Drive";
+                can also be entered on the Documents screen),
               RAG_GDRIVE_CREDENTIALS (service account key file; default: Application Default Credentials),
               RAG_GDRIVE_DIR (where in RAG_DOCS the Drive files go, default "gdrive")
 
@@ -36,6 +39,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from rag import gdrive
 from rag.agent import MODEL, PRICES, RagAgent, Usage
 from rag.store import KnowledgeBase
 from server import auth as auth_module
@@ -43,6 +47,8 @@ from server import evals
 from server.conversations import ConversationStore
 from server.documents import DriveSync, make_router
 from server.feedback import FeedbackStore, Settings, SettingsStore, export_eval_set
+from server.gdrive_connect import DriveConnection
+from server.gdrive_connect import make_router as make_drive_router
 from server.security import LocalhostGuard
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -84,23 +90,40 @@ def _transcriber() -> Any:
     return claude_pdf_transcriber()
 
 
-def _drive_sync() -> DriveSync | None:
-    """The Google Drive folder to sync from (RAG_GDRIVE_FOLDER), mirrored into RAG_DOCS/RAG_GDRIVE_DIR."""
-    folder = os.environ.get("RAG_GDRIVE_FOLDER", "").strip()
-    if not folder:
-        return None
-    from rag import gdrive
-
+def _drive_dest() -> Path:
+    """Where Drive files are mirrored: RAG_DOCS/RAG_GDRIVE_DIR."""
     dest = (DOCS_DIR / os.environ.get("RAG_GDRIVE_DIR", "gdrive")).resolve()
     if not dest.is_relative_to(DOCS_DIR.resolve()) or dest == DOCS_DIR.resolve():
         raise RuntimeError("RAG_GDRIVE_DIR must be a subfolder of the documents folder (RAG_DOCS)")
-    credentials = os.environ.get("RAG_GDRIVE_CREDENTIALS") or None
-    return DriveSync(gdrive.folder_id(folder), DOCS_DIR / dest.relative_to(DOCS_DIR.resolve()),
-                     functools.cache(lambda: gdrive.drive_session(credentials)))
+    return DOCS_DIR / dest.relative_to(DOCS_DIR.resolve())
+
+
+DRIVE_DEST = _drive_dest()
+_ENV_DRIVE_FOLDER = os.environ.get("RAG_GDRIVE_FOLDER", "").strip()
+_env_drive: DriveSync | None = None
+if _ENV_DRIVE_FOLDER:  # set by the server: a service account or Application Default Credentials
+    _credentials = os.environ.get("RAG_GDRIVE_CREDENTIALS") or None
+    _env_drive = DriveSync(gdrive.folder_id(_ENV_DRIVE_FOLDER), DRIVE_DEST,
+                           functools.cache(lambda: gdrive.drive_session(_credentials)))
+# Otherwise connected from the Documents screen with "Sign in with Google" (server/gdrive_connect.py).
+drive_connection = DriveConnection(DATA_DIR / "gdrive.json", os.environ.get("RAG_GDRIVE_CLIENT_ID"),
+                                   os.environ.get("RAG_GDRIVE_CLIENT_SECRET"))
+
+
+def _drive_sync() -> DriveSync | None:
+    """The Google Drive folder to sync from right now, if there is one."""
+    if _env_drive is not None:
+        return _env_drive
+    data = drive_connection.load()
+    if not (data.get("folder") and data.get("refresh_token") and drive_connection.client()):
+        return None
+    return DriveSync(data["folder"], DRIVE_DEST, drive_connection.session)
 
 
 kb = KnowledgeBase(INDEX_DIR, rerank=RERANK, pdf_ocr=_make_ocr())
-app.include_router(make_router(kb, DOCS_DIR, _transcriber, _drive_sync()))
+app.include_router(make_router(kb, DOCS_DIR, _transcriber, _drive_sync))
+app.include_router(make_drive_router(drive_connection, _env_drive.folder if _env_drive else None,
+                                     str(DRIVE_DEST.relative_to(DOCS_DIR)), lambda: gdrive.last_sync(DRIVE_DEST)))
 
 
 def _make_client() -> Any:

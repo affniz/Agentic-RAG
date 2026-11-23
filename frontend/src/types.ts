@@ -139,6 +139,26 @@ export type DriveSyncReport = {
   finished_at: number;
 };
 
+/** GET /api/gdrive/folders: one screen of the folder picker. */
+export type DriveFolders = {
+  folders: { id: string; name: string }[];
+  files: { total: number; supported: number } | null; // files directly in the folder (null for locations and searches)
+  truncated: boolean; // more than the server lists; search to narrow it down
+};
+
+/** GET /api/gdrive: the Google Drive connection shown on the Documents screen. */
+export type DriveStatus = {
+  mode: "env" | "oauth"; // env: the folder is set by the server (RAG_GDRIVE_FOLDER); oauth: connected in the UI
+  client: { configured: boolean; from_env: boolean; client_id: string | null }; // the Google OAuth client
+  account: string | null; // email of the signed-in Google account
+  folder: string | null;
+  folder_name: string | null;
+  dir: string; // where in the documents folder synced files go
+  redirect_uri: string; // to register on the OAuth client
+  last_sync: DriveSyncReport | null;
+  error: string | null; // why the last sign-in didn't work
+};
+
 export type DocumentsResponse = {
   documents: DocumentRow[];
   chunks: number;

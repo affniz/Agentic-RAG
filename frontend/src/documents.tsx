@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type DragEvent } from "react";
 import { api } from "./api";
 import { Icon } from "./components";
-import type { DocChunks, DocStatus, DocumentRow, DocumentsResponse, DriveSyncReport, Health, IngestState, SearchResponse } from "./types";
+import type { DocChunks, DocStatus, DocumentRow, DocumentsResponse, DriveFolders, DriveStatus, DriveSyncReport, Health, IngestState, SearchResponse } from "./types";
 
 // ---------------------------------------------------------------- helpers
 
@@ -155,13 +155,6 @@ export function DocumentsPage({ health, onIndexChanged }: { health: Health | nul
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
-              {data?.gdrive && (
-                <button className={btnSecondary} onClick={syncDrive} disabled={running}
-                  title={`Download new and changed files from the Google Drive folder into ${data.gdrive.dir}/, then index them${
-                    data.gdrive.last_sync ? ` (last synced ${when(data.gdrive.last_sync.finished_at)})` : ""}`}>
-                  {Icon.cloud()} Sync Google Drive
-                </button>
-              )}
               <button className={btnSecondary} onClick={() => reindex(true)} disabled={running}
                 title="Re-embed every document from scratch">Rebuild all</button>
               <button className={data?.needs_ingest ? btnPrimary : btnSecondary} onClick={() => reindex(false)} disabled={running}
@@ -191,6 +184,7 @@ export function DocumentsPage({ health, onIndexChanged }: { health: Health | nul
 
           {tab === "files" ? (
             <div className="mt-4 space-y-4">
+              <DrivePanel running={running} lastJob={ingest.finished_at} onSync={syncDrive} />
               <DropZone onFiles={(files) => upload(files)} busy={uploading} />
               {rejected.length > 0 && (
                 <Alert tone="error">
@@ -326,6 +320,276 @@ function EmptyFilesNotice({ docs, ocr, onReindex, onTranscribe }: {
             </button>
           ))}
           {ocr && <span className="text-xs">or <button onClick={onReindex} className="font-medium underline">re-index</button> - automatic transcription is on.</span>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const input = "w-full rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-sm outline-none focus:border-indigo-500 dark:border-zinc-800 dark:bg-zinc-950";
+const link = "font-medium text-indigo-700 underline decoration-indigo-300 underline-offset-2 hover:text-indigo-900 dark:text-indigo-400 dark:decoration-indigo-700";
+
+/** Connect a Google Drive folder: one-time OAuth client setup, "Connect Google Drive", choose a folder, sync. */
+function DrivePanel({ running, lastJob, onSync }: { running: boolean; lastJob?: number; onSync: () => void }) {
+  const [st, setSt] = useState<DriveStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [setup, setSetup] = useState(false); // OAuth client form open
+  const [editFolder, setEditFolder] = useState(false);
+
+  // Reload after each job (a sync updates "last synced") and when the user comes back from Google's sign-in.
+  useEffect(() => { api.drive().then(setSt).catch((e) => setError((e as Error).message)); }, [lastJob]);
+
+  async function act(fn: () => Promise<DriveStatus | void>) {
+    setBusy(true);
+    setError(null);
+    try {
+      const next = await fn();
+      if (next) setSt(next);
+      return true;
+    } catch (e) {
+      setError((e as Error).message);
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function connect() {
+    setBusy(true);
+    setError(null);
+    try {
+      window.location.href = (await api.connectDrive()).url; // Google's sign-in; it sends the browser back here
+    } catch (e) {
+      setError((e as Error).message);
+      setBusy(false);
+    }
+  }
+
+  if (!st) return error ? <Alert tone="error">{error}</Alert> : null;
+  const synced = st.last_sync ? `Last synced ${when(st.last_sync.finished_at)}` : "Not synced yet";
+  const ready = st.mode === "env" || (st.account && st.folder);
+
+  return (
+    <section className="rounded-xl border border-zinc-200 p-4 dark:border-zinc-800" aria-label="Google Drive">
+      <div className="flex flex-wrap items-start gap-3">
+        <span className="mt-0.5 rounded-lg bg-zinc-100 p-2 text-zinc-600 dark:bg-zinc-900 dark:text-zinc-300">{Icon.cloud()}</span>
+        <div className="min-w-[12rem] flex-1">
+          <h3 className="text-sm font-semibold">Google Drive</h3>
+          <p className="mt-0.5 text-sm text-zinc-500">
+            {st.mode === "env" ? <>Folder set by the server · synced into <code>{st.dir}/</code> · {synced}</>
+              : st.account ? <>Connected as <span className="font-medium text-zinc-700 dark:text-zinc-300">{st.account}</span>
+                {st.folder && <> · Folder <span className="font-medium text-zinc-700 dark:text-zinc-300">{st.folder_name ?? st.folder}</span> · {synced}</>}</>
+              : "Sync Google Docs, Slides, PDFs and text files from a Drive folder. Read-only."}
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {ready && (
+            <button className={btnPrimary} onClick={onSync} disabled={running || busy}
+              title={`Download new and changed files into ${st.dir}/, then index them`}>
+              {running ? Icon.spinner() : Icon.refresh()} Sync now
+            </button>
+          )}
+          {st.mode === "oauth" && st.account && st.folder && !editFolder && (
+            <button className={btnSecondary} onClick={() => setEditFolder(true)} disabled={busy}>Change folder</button>
+          )}
+          {st.mode === "oauth" && st.account && (
+            <button className={btnSecondary} disabled={busy || running}
+              onClick={() => window.confirm("Disconnect Google Drive? Files already synced stay in your documents.")
+                && act(api.disconnectDrive).then(() => setEditFolder(false))}>
+              Disconnect
+            </button>
+          )}
+          {st.mode === "oauth" && !st.account && st.client.configured && (
+            <button className={btnPrimary} onClick={connect} disabled={busy}>
+              {busy ? Icon.spinner() : Icon.cloud()} Connect Google Drive
+            </button>
+          )}
+          {st.mode === "oauth" && !st.client.configured && !setup && (
+            <button className={btnPrimary} onClick={() => setSetup(true)}>Set up Google sign-in</button>
+          )}
+        </div>
+      </div>
+
+      {st.error && (
+        <div className="mt-3 flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300" role="alert">
+          <span className="flex-1">Couldn't connect Google Drive: {st.error}</span>
+          <button aria-label="Dismiss" onClick={() => act(api.dismissDriveError)}>{Icon.x()}</button>
+        </div>
+      )}
+      {error && <Alert tone="error">{error}</Alert>}
+
+      {st.mode === "oauth" && !st.account && st.client.configured && (
+        <p className="mt-3 text-xs text-zinc-500">
+          Google may say it hasn't verified this app; it's your own OAuth client, so choose <b>Continue</b>, and tick
+          the Google Drive permission.{" "}
+          {!st.client.from_env && <button className={link} onClick={() => setSetup((v) => !v)}>Change OAuth client</button>}
+        </p>
+      )}
+
+      {st.mode === "oauth" && setup && !st.client.from_env && (!st.account || !st.client.configured) && (
+        <ClientSetup status={st} busy={busy} onCancel={st.client.configured ? () => setSetup(false) : undefined}
+          onSave={(id, secret) => act(() => api.setDriveClient(id, secret)).then((ok) => ok && setSetup(false))} />
+      )}
+
+      {st.mode === "oauth" && st.account && (!st.folder || editFolder) && (
+        <FolderPicker current={st.folder} busy={busy || running} onCancel={st.folder ? () => setEditFolder(false) : undefined}
+          onSave={(folder) => act(() => api.setDriveFolder(folder)).then((ok) => {
+            if (!ok) return;
+            setEditFolder(false);
+            onSync(); // picking a folder means "sync this": start right away
+          })} />
+      )}
+    </section>
+  );
+}
+
+function ClientSetup({ status, busy, onSave, onCancel }: {
+  status: DriveStatus; busy: boolean; onSave: (id: string, secret: string) => void; onCancel?: () => void;
+}) {
+  const [id, setId] = useState("");
+  const [secret, setSecret] = useState("");
+  const [copied, setCopied] = useState(false);
+  const step = "pl-1";
+  return (
+    <form className="mt-4 space-y-3 border-t border-zinc-200 pt-4 text-sm dark:border-zinc-800"
+      onSubmit={(e) => { e.preventDefault(); onSave(id, secret); }}>
+      <p className="font-medium">One-time setup: create a Google OAuth client for this app</p>
+      <ol className="list-decimal space-y-1.5 pl-5 text-zinc-600 dark:text-zinc-400">
+        <li className={step}>In Google Cloud, <a className={link} href="https://console.cloud.google.com/apis/library/drive.googleapis.com" target="_blank" rel="noreferrer">enable the Google Drive API</a> for a project.</li>
+        <li className={step}><a className={link} href="https://console.cloud.google.com/auth/overview" target="_blank" rel="noreferrer">Set up Google Auth Platform</a>: audience <b>External</b>, and add the Google accounts that will connect as <b>test users</b>.</li>
+        <li className={step}>
+          <a className={link} href="https://console.cloud.google.com/auth/clients/create" target="_blank" rel="noreferrer">Create a client</a> of type <b>Web application</b> with this authorized redirect URI:
+          <div className="mt-1.5 flex items-center gap-2">
+            <code className="min-w-0 flex-1 truncate rounded-md bg-zinc-100 px-2 py-1 text-xs text-zinc-800 dark:bg-zinc-900 dark:text-zinc-200">{status.redirect_uri}</code>
+            <button type="button" className={btnSecondary}
+              onClick={() => navigator.clipboard?.writeText(status.redirect_uri).then(() => setCopied(true))}>
+              {copied ? Icon.check() : null} {copied ? "Copied" : "Copy"}
+            </button>
+          </div>
+        </li>
+        <li className={step}>Paste the client's ID and secret:</li>
+      </ol>
+      <div className="grid gap-2 sm:grid-cols-2">
+        <input className={input} placeholder="Client ID (…apps.googleusercontent.com)" value={id} onChange={(e) => setId(e.target.value)}
+          autoComplete="off" spellCheck={false} required aria-label="OAuth client ID" />
+        <input className={input} placeholder="Client secret" type="password" value={secret} onChange={(e) => setSecret(e.target.value)}
+          autoComplete="off" required aria-label="OAuth client secret" />
+      </div>
+      <div className="flex gap-2">
+        <button className={btnPrimary} type="submit" disabled={busy || !id.trim() || !secret.trim()}>Save</button>
+        {onCancel && <button className={btnSecondary} type="button" onClick={onCancel}>Cancel</button>}
+      </div>
+      <p className="text-xs text-zinc-500">The secret is stored on this server only and is never shown again.</p>
+    </form>
+  );
+}
+
+type Crumb = { id: string; name: string; q?: string }; // id: a folder id, a location ("root", "shared", "drives") or "search"
+const LOCATIONS: Crumb[] = [{ id: "root", name: "My Drive" }, { id: "shared", name: "Shared with me" }, { id: "drives", name: "Shared drives" }];
+
+/** Browse the signed-in account's Drive and choose the folder to sync. */
+function FolderPicker({ current, busy, onSave, onCancel }: {
+  current: string | null; busy: boolean; onSave: (folderId: string) => void; onCancel?: () => void;
+}) {
+  const [trail, setTrail] = useState<Crumb[]>([LOCATIONS[0]]);
+  const [search, setSearch] = useState("");
+  const [res, setRes] = useState<DriveFolders | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const here = trail[trail.length - 1];
+  const inFolder = !LOCATIONS.some((l) => l.id === here.id) && here.id !== "search";
+
+  useEffect(() => {
+    let live = true;
+    setLoading(true);
+    setError(null);
+    setRes(null); // don't show the previous folder's list under the new path
+    api.driveFolders(here.id === "search" ? { q: here.q } : { parent: here.id })
+      .then((r) => live && setRes(r))
+      .catch((e) => live && (setRes(null), setError((e as Error).message)))
+      .finally(() => live && setLoading(false));
+    return () => { live = false; };
+  }, [here.id, here.q]);
+
+  // Searching replaces the trail; clearing the box goes back to My Drive.
+  useEffect(() => {
+    const q = search.trim();
+    if (!q) {
+      setTrail((t) => (t[0].id === "search" ? [LOCATIONS[0]] : t));
+      return;
+    }
+    const timer = setTimeout(() => setTrail([{ id: "search", name: `Folders named “${q}”`, q }]), 300);
+    return () => clearTimeout(timer);
+  }, [search]);
+
+  const open = (f: Crumb) => setTrail((t) => [...t, f]);
+  const tab = (l: Crumb) => `rounded-full px-3 py-1 text-xs font-medium ${trail[0].id === l.id
+    ? "bg-indigo-600 text-white" : "bg-zinc-100 text-zinc-700 hover:bg-zinc-200 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800"}`;
+
+  return (
+    <div className="mt-4 border-t border-zinc-200 pt-4 dark:border-zinc-800">
+      <div className="flex flex-wrap items-center gap-2">
+        <h4 className="mr-auto text-sm font-medium">Choose the folder to sync</h4>
+        {onCancel && <button className={btnSecondary} type="button" onClick={onCancel}>Cancel</button>}
+      </div>
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        {LOCATIONS.map((l) => (
+          <button key={l.id} type="button" className={tab(l)} onClick={() => { setSearch(""); setTrail([l]); }}>{l.name}</button>
+        ))}
+        <div className="relative min-w-[10rem] flex-1">
+          <span className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-400">{Icon.search("h-3.5 w-3.5")}</span>
+          <input className={`${input} pl-8`} type="search" placeholder="Search folders by name" value={search}
+            onChange={(e) => setSearch(e.target.value)} aria-label="Search Google Drive folders" />
+        </div>
+      </div>
+
+      <nav className="mt-3 flex flex-wrap items-center gap-1 text-sm" aria-label="Folder path">
+        {trail.map((c, i) => (
+          <span key={`${c.id}:${i}`} className="flex items-center gap-1">
+            {i > 0 && <span className="text-zinc-400">{Icon.chevron("h-3.5 w-3.5")}</span>}
+            {i < trail.length - 1
+              ? <button type="button" className="text-zinc-500 hover:text-zinc-900 hover:underline dark:hover:text-zinc-100" onClick={() => setTrail(trail.slice(0, i + 1))}>{c.name}</button>
+              : <span className="font-medium">{c.name}</span>}
+          </span>
+        ))}
+        {loading && <span className="ml-1 text-zinc-400">{Icon.spinner("h-3.5 w-3.5")}</span>}
+      </nav>
+
+      {error ? <Alert tone="error">{error}</Alert> : (
+        <ul className="mt-2 max-h-72 divide-y divide-zinc-100 overflow-y-auto rounded-lg border border-zinc-200 dark:divide-zinc-900 dark:border-zinc-800" aria-busy={loading}>
+          {res?.folders.map((f) => (
+            <li key={f.id} className="group flex items-center gap-2 px-2 py-1.5 hover:bg-zinc-50 dark:hover:bg-zinc-900/60">
+              <button type="button" className="flex min-w-0 flex-1 items-center gap-2 rounded px-1 py-0.5 text-left text-sm"
+                onClick={() => { setSearch(""); open(f); }} title={`Open ${f.name}`}>
+                <span className="text-zinc-400">{Icon.folder("h-4 w-4")}</span>
+                <span className="truncate">{f.name}</span>
+                {f.id === current && <span className="shrink-0 text-xs font-medium text-emerald-700 dark:text-emerald-400">(syncing now)</span>}
+              </button>
+              <button type="button" className={`${btnSecondary} !px-2 !py-1 text-xs sm:opacity-0 sm:group-hover:opacity-100 sm:focus:opacity-100`}
+                disabled={busy} onClick={() => onSave(f.id)} aria-label={`Sync ${f.name}`}>Sync</button>
+            </li>
+          ))}
+          {res && !res.folders.length && !loading && (
+            <li className="px-3 py-6 text-center text-sm text-zinc-500">
+              {here.id === "search" ? "No folders with that name." : here.id === "drives" ? "You aren't a member of any shared drives."
+                : inFolder ? "No subfolders here." : "No folders here."}
+            </li>
+          )}
+          {!res && loading && <li className="px-3 py-6 text-center text-sm text-zinc-400">Loading…</li>}
+        </ul>
+      )}
+      {res?.truncated && <p className="mt-1 text-xs text-zinc-500">Showing the first {res.folders.length}; search to find others.</p>}
+
+      {inFolder && (
+        <div className="mt-3 flex flex-wrap items-center gap-3 rounded-lg bg-zinc-50 px-3 py-2 dark:bg-zinc-900/60">
+          <p className="min-w-0 flex-1 text-xs text-zinc-500">
+            {res?.files ? `${res.files.total} file${res.files.total === 1 ? "" : "s"} directly in this folder, ${res.files.supported} of them can be synced (Docs, Slides, PDF, .md, .txt).` : "\u00a0"}
+            {" "}Subfolders are included.
+          </p>
+          <button className={btnPrimary} type="button" disabled={busy} onClick={() => onSave(here.id)}>
+            {busy && Icon.spinner()} Sync “{here.name}”
+          </button>
         </div>
       )}
     </div>

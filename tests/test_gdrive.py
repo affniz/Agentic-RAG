@@ -29,23 +29,41 @@ class FakeDrive:
     """files: id -> {name, mimeType, parent, modifiedTime, data, [size]}; folders are files too."""
 
     def __init__(self):
-        self.files = {ROOT: {"name": "Policies", "mimeType": gdrive.FOLDER, "parent": None}}
+        self.files = {ROOT: {"name": "Policies", "mimeType": gdrive.FOLDER, "parent": "root"}}
+        self.drives = [{"id": "0ADriveEng001", "name": "Engineering"}]  # shared drives
         self.fail: set[str] = set()  # ids whose download returns 500
         self.downloads: list[str] = []
         self.page_size = 2  # force pagination
+        self.queries: list[str | None] = []
 
     def add(self, fid, name, mime, data=b"", parent=ROOT, modified="2026-01-01T00:00:00Z", **extra):
         self.files[fid] = {"name": name, "mimeType": mime, "parent": parent, "modifiedTime": modified,
                            "data": data, **extra}
 
+    def _matches(self, q, f):
+        """The subset of Drive's query language the connector uses."""
+        if "trashed = false" not in q or ("mimeType = '%s'" % gdrive.FOLDER in q and f["mimeType"] != gdrive.FOLDER):
+            return False
+        if " in parents" in q:
+            return f["parent"] == q.split("'")[1]
+        if "sharedWithMe = true" in q:
+            return f.get("shared", False)
+        if "name contains " in q:
+            needle = q.split("name contains ", 1)[1][1:-1].replace("\\'", "'").replace("\\\\", "\\")
+            return needle.casefold() in f["name"].casefold()
+        raise AssertionError(f"unexpected query {q!r}")
+
     def get(self, url, params=None, timeout=None):
         params = params or {}
+        self.queries.append(params.get("q"))
+        if url == gdrive.DRIVES_API:
+            return Resp(200, {"drives": self.drives})
         assert url.startswith(gdrive.API)
         rest = url[len(gdrive.API):].strip("/")
         if not rest:  # files.list
-            parent = params["q"].split("'")[1]
-            kids = sorted((fid for fid, f in self.files.items() if f["parent"] == parent),
-                          key=lambda fid: self.files[fid]["name"])
+            assert params["corpora"] == "allDrives"
+            kids = sorted((fid for fid, f in self.files.items() if self._matches(params["q"], f)),
+                          key=lambda fid: (self.files[fid]["mimeType"] != gdrive.FOLDER, self.files[fid]["name"]))
             start = int(params.get("pageToken", 0))
             page = kids[start : start + self.page_size]
             body = {"files": [{"id": fid, **{k: v for k, v in self.files[fid].items() if k not in ("data", "parent")}}
@@ -180,8 +198,11 @@ def _client(tmp_path, monkeypatch, drive=None):
     (docs / "local.md").write_text("# Local\nA local document.")
     monkeypatch.setenv("RAG_DOCS", str(docs))
     monkeypatch.setenv("RAG_INDEX", str(tmp_path / "idx"))
+    monkeypatch.setenv("RAG_DATA", str(tmp_path / "data"))
     monkeypatch.setenv("RAG_FAKE_LLM", "1")
     monkeypatch.setenv("RAG_RERANK", "0")
+    for var in ("RAG_PASSWORD", "RAG_GDRIVE_CLIENT_ID", "RAG_GDRIVE_CLIENT_SECRET"):
+        monkeypatch.delenv(var, raising=False)
     if drive is not None:
         monkeypatch.setenv("RAG_GDRIVE_FOLDER", f"https://drive.google.com/drive/folders/{ROOT}")
         monkeypatch.setattr(gdrive, "drive_session", lambda credentials=None: drive)
@@ -205,7 +226,7 @@ def test_server_sync_not_configured(tmp_path, monkeypatch):
     c = _client(tmp_path, monkeypatch)
     assert c.get("/api/documents").json()["gdrive"] is None
     r = c.post("/api/gdrive/sync")
-    assert r.status_code == 404 and "RAG_GDRIVE_FOLDER" in r.json()["detail"]
+    assert r.status_code == 404 and "connect it" in r.json()["detail"]
 
 
 def test_server_sync_downloads_and_indexes(drive, tmp_path, monkeypatch):
@@ -232,3 +253,292 @@ def test_server_sync_downloads_and_indexes(drive, tmp_path, monkeypatch):
     c.post("/api/gdrive/sync")
     st = _wait(c)
     assert st["state"] == "error" and "no access" in st["error"] and st["reason"] == "gdrive"
+
+
+# ---------------------------------------------------------------- "Connect Google Drive" (OAuth)
+
+import base64  # noqa: E402
+import hashlib  # noqa: E402
+import os  # noqa: E402
+import stat  # noqa: E402
+from urllib.parse import parse_qs, urlsplit  # noqa: E402
+
+from server import gdrive_connect  # noqa: E402
+
+CLIENT_ID = "1234-abc.apps.googleusercontent.com"
+SECRET = "GOCSPX-client-secret"
+REFRESH = "1//refresh-token-from-google"
+
+
+def _id_token(email):
+    payload = base64.urlsafe_b64encode(json.dumps({"email": email}).encode()).rstrip(b"=").decode()
+    return f"header.{payload}.signature"
+
+
+class FakeGoogle:
+    """Google's token and revoke endpoints."""
+
+    def __init__(self):
+        self.calls: list[tuple[str, dict]] = []
+        self.challenge: str | None = None  # from the authorization URL, checked against the verifier
+        self.scope = f"openid https://www.googleapis.com/auth/userinfo.email {gdrive.SCOPE}"
+        self.refresh = REFRESH
+
+    def post(self, url, data):
+        self.calls.append((url, data))
+        if url == gdrive_connect.REVOKE_URL:
+            return 200, {}
+        assert url == gdrive_connect.TOKEN_URL and data["grant_type"] == "authorization_code"
+        if data["code"] != "good-code" or data["client_secret"] != SECRET:
+            return 400, {"error": "invalid_grant", "error_description": "Bad Request"}
+        digest = hashlib.sha256(data["code_verifier"].encode()).digest()
+        assert base64.urlsafe_b64encode(digest).rstrip(b"=").decode() == self.challenge  # PKCE
+        assert data["redirect_uri"] == "http://testserver/api/gdrive/oauth/callback"
+        return 200, {"access_token": "ya29", "refresh_token": self.refresh, "scope": self.scope,
+                     "id_token": _id_token("pat@example.com")}
+
+
+@pytest.fixture
+def oauth(tmp_path, monkeypatch, drive):
+    """The app with nothing configured, a fake Google, and `drive` as what the signed-in account sees."""
+    c = _client(tmp_path, monkeypatch)
+    import server.app as app_module
+
+    google = FakeGoogle()
+    app_module.drive_connection.post = google.post
+    sessions = []
+    monkeypatch.setattr(gdrive, "oauth_session", lambda *a: sessions.append(a) or drive)
+    return c, google, sessions, tmp_path / "data" / "gdrive.json"
+
+
+def _start(c, google):
+    r = c.post("/api/gdrive/connect")
+    assert r.status_code == 200
+    q = {k: v[0] for k, v in parse_qs(urlsplit(r.json()["url"]).query).items()}
+    google.challenge = q["code_challenge"]
+    return q
+
+
+def _callback(c, **params):
+    return c.get("/api/gdrive/oauth/callback", params=params, follow_redirects=False)
+
+
+def test_connect_drive_from_the_ui(oauth, drive):
+    c, google, sessions, saved = oauth
+    st = c.get("/api/gdrive").json()
+    assert st["mode"] == "oauth" and st["client"] == {"configured": False, "from_env": False, "client_id": None}
+    assert st["redirect_uri"] == "http://testserver/api/gdrive/oauth/callback" and st["account"] is None
+    assert c.post("/api/gdrive/connect").status_code == 400  # no OAuth client yet
+
+    # One-time setup: the OAuth client.
+    assert c.put("/api/gdrive/client", json={"client_id": "nope", "client_secret": "x"}).status_code == 400
+    r = c.put("/api/gdrive/client", json={"client_id": f" {CLIENT_ID} ", "client_secret": SECRET})
+    assert r.json()["client"] == {"configured": True, "from_env": False, "client_id": CLIENT_ID}
+    assert SECRET not in r.text
+
+    # Sign in with Google.
+    q = _start(c, google)
+    assert q["client_id"] == CLIENT_ID and q["access_type"] == "offline" and q["code_challenge_method"] == "S256"
+    assert gdrive.SCOPE in q["scope"].split() and q["redirect_uri"].endswith("/api/gdrive/oauth/callback")
+    r = _callback(c, state=q["state"], code="good-code")
+    assert r.status_code == 303 and r.headers["location"] == "/#/documents"
+    st = c.get("/api/gdrive").json()
+    assert st["account"] == "pat@example.com" and st["error"] is None
+    assert REFRESH not in json.dumps(st) and SECRET not in json.dumps(st)
+    assert stat.S_IMODE(os.stat(saved).st_mode) == 0o600 and json.loads(saved.read_text())["refresh_token"] == REFRESH
+
+    # The same state can't be used twice.
+    assert _callback(c, state=q["state"], code="good-code").status_code == 303
+    assert len([u for u, _ in google.calls if u == gdrive_connect.TOKEN_URL]) == 1
+
+    # Choose the folder: checked against Drive before it's saved.
+    assert c.put("/api/gdrive/folder", json={"folder": "not a link!"}).status_code == 400
+    r = c.put("/api/gdrive/folder", json={"folder": "https://drive.google.com/drive/folders/missingFolder123"})
+    assert r.status_code == 400 and "404" in r.json()["detail"]
+    r = c.put("/api/gdrive/folder", json={"folder": f"https://drive.google.com/drive/folders/{ROOT}?usp=sharing"})
+    assert r.json()["folder"] == ROOT and r.json()["folder_name"] == "Policies"
+    assert sessions[-1] == (CLIENT_ID, SECRET, REFRESH, gdrive_connect.TOKEN_URL)
+
+    # Sync it, through the same job as before.
+    assert c.get("/api/documents").json()["gdrive"]["folder"] == ROOT
+    assert c.post("/api/gdrive/sync").json()["reason"] == "gdrive"
+    st = _wait(c)
+    assert st["state"] == "done" and "gdrive/HR/Benefits.md" in st["report"]["added"]
+    assert c.get("/api/gdrive").json()["last_sync"]["downloaded"]
+
+    # Disconnect: the token is revoked and forgotten; synced files stay.
+    r = c.delete("/api/gdrive/account")
+    assert r.json()["account"] is None and google.calls[-1] == (gdrive_connect.REVOKE_URL, {"token": REFRESH})
+    assert "refresh_token" not in json.loads(saved.read_text())
+    assert c.post("/api/gdrive/sync").status_code == 404
+    assert any(d["name"] == "gdrive/HR/Benefits.md" for d in c.get("/api/documents").json()["documents"])
+
+
+def test_callback_errors_are_shown_only_to_the_browser_that_signed_in(oauth):
+    c, google, _, saved = oauth
+    c.put("/api/gdrive/client", json={"client_id": CLIENT_ID, "client_secret": SECRET})
+
+    # Another browser (no state cookie), or a made-up state: nothing is written.
+    q = _start(c, google)
+    other = TestClient(c.app)
+    assert _callback(other, state=q["state"], code="good-code").status_code == 303
+    assert _callback(other, state="made-up").status_code == 303
+    st = c.get("/api/gdrive").json()
+    assert st["account"] is None and st["error"] is None
+
+    # The state was used up by that attempt, so this browser's own callback is now refused, with a message.
+    _callback(c, state=q["state"], code="good-code")
+    assert "expired or was already used" in c.get("/api/gdrive").json()["error"]
+
+    q = _start(c, google)  # cancelled on Google's screen
+    _callback(c, state=q["state"], error="access_denied")
+    assert c.get("/api/gdrive").json()["error"] == "access was not granted"
+
+    google.scope = "openid email"  # Drive box unticked on the consent screen
+    q = _start(c, google)
+    _callback(c, state=q["state"], code="good-code")
+    assert "Google Drive access wasn't allowed" in c.get("/api/gdrive").json()["error"]
+
+    q = _start(c, google)  # bad secret
+    c.put("/api/gdrive/client", json={"client_id": CLIENT_ID, "client_secret": "wrong"})
+    _callback(c, state=q["state"], code="good-code")
+    assert "check the client ID and secret" in c.get("/api/gdrive").json()["error"]
+    assert c.delete("/api/gdrive/error").json()["error"] is None
+    assert "refresh_token" not in json.loads(saved.read_text())
+
+
+def test_new_client_signs_out_and_reconnect_revokes_old_token(oauth):
+    c, google, _, _ = oauth
+    c.put("/api/gdrive/client", json={"client_id": CLIENT_ID, "client_secret": SECRET})
+    _callback(c, state=_start(c, google)["state"], code="good-code")
+    google.refresh = "1//second-token"
+    _callback(c, state=_start(c, google)["state"], code="good-code")
+    assert google.calls[-1] == (gdrive_connect.REVOKE_URL, {"token": REFRESH})
+
+    other_id = "9999-xyz.apps.googleusercontent.com"
+    st = c.put("/api/gdrive/client", json={"client_id": other_id, "client_secret": SECRET}).json()
+    assert st["account"] is None and google.calls[-1] == (gdrive_connect.REVOKE_URL, {"token": "1//second-token"})
+
+
+def test_env_folder_takes_precedence(drive, tmp_path, monkeypatch):
+    c = _client(tmp_path, monkeypatch, drive)
+    st = c.get("/api/gdrive").json()
+    assert st["mode"] == "env" and st["folder"] == ROOT
+    assert c.put("/api/gdrive/client", json={"client_id": CLIENT_ID, "client_secret": SECRET}).status_code == 409
+    assert c.post("/api/gdrive/connect").status_code == 409
+
+
+def test_env_client_is_used_and_locked(tmp_path, monkeypatch):
+    _client(tmp_path, monkeypatch)  # sets up the folders (and clears these), then reload with them
+    monkeypatch.setenv("RAG_GDRIVE_CLIENT_ID", CLIENT_ID)
+    monkeypatch.setenv("RAG_GDRIVE_CLIENT_SECRET", SECRET)
+    import server.app as app_module
+
+    c = TestClient(importlib.reload(app_module).app)
+    assert c.get("/api/gdrive").json()["client"] == {"configured": True, "from_env": True, "client_id": CLIENT_ID}
+    assert c.put("/api/gdrive/client", json={"client_id": CLIENT_ID, "client_secret": "x"}).status_code == 409
+    assert c.post("/api/gdrive/connect").status_code == 200
+
+
+def test_callback_needs_no_login_but_the_rest_does(tmp_path, monkeypatch):
+    _client(tmp_path, monkeypatch)
+    monkeypatch.setenv("RAG_PASSWORD", "correct horse battery staple")
+    import server.app as app_module
+
+    c = TestClient(importlib.reload(app_module).app)
+    for method, path in [("GET", "/api/gdrive"), ("PUT", "/api/gdrive/client"), ("POST", "/api/gdrive/connect"),
+                         ("PUT", "/api/gdrive/folder"), ("DELETE", "/api/gdrive/account")]:
+        assert c.request(method, path).status_code == 401, path
+    r = _callback(c, state="x", code="y")
+    assert r.status_code == 303 and not (tmp_path / "data" / "gdrive.json").exists()
+
+
+def test_revoked_token_is_reported_as_reconnect():
+    from google.auth.exceptions import RefreshError
+
+    class Dead:
+        def __init__(self, code):
+            self.code = code
+
+        def get(self, *a, **k):  # google-auth raises it with (message, response body)
+            raise RefreshError(f"{self.code}: Token has been expired or revoked.", {"error": self.code})
+
+    with pytest.raises(gdrive.DriveError, match=r"expired or was revoked \(invalid_grant\) - connect Google Drive again$"):
+        gdrive._OAuthSession(Dead("invalid_grant")).get(gdrive.API)
+    with pytest.raises(gdrive.DriveError, match="OAuth client ID or secret"):
+        gdrive._OAuthSession(Dead("invalid_client")).get(gdrive.API)
+
+
+# ---------------------------------------------------------------- choosing the folder in the app
+
+
+def test_browse_locations_folders_and_search(drive):
+    drive.add("shr1", "Team Handbook", gdrive.FOLDER, parent="someoneElse", shared=True)
+    drive.add("shr2", "Budgets", gdrive.FOLDER, parent="someoneElse", shared=True)
+    drive.add("note", "Shared note.txt", "text/plain", parent="someoneElse", shared=True)  # files aren't listed
+    drive.add("quot", "Bob's \\ notes", gdrive.FOLDER, parent="sub1")
+
+    mine = gdrive.browse(drive, "root")
+    assert mine == {"folders": [{"id": ROOT, "name": "Policies"}], "files": None, "truncated": False}
+
+    inside = gdrive.browse(drive, ROOT)
+    assert inside["folders"] == [{"id": "sub1", "name": "HR"}]
+    # 7 files directly in it; by type, all but the sheet and the image can be synced (size isn't checked here).
+    assert inside["files"] == {"total": 7, "supported": 5}
+
+    shared = gdrive.browse(drive, "shared")
+    assert [f["name"] for f in shared["folders"]] == ["Budgets", "Team Handbook"] and shared["files"] is None
+
+    assert gdrive.browse(drive, "drives")["folders"] == [{"id": "0ADriveEng001", "name": "Engineering"}]
+
+    found = gdrive.browse(drive, search="hand")
+    assert [f["name"] for f in found["folders"]] == ["Team Handbook"]
+    # Quotes and backslashes are escaped in the query, not able to end the string literal.
+    assert gdrive.browse(drive, search="Bob's \\")["folders"] == [{"id": "quot", "name": "Bob's \\ notes"}]
+    assert drive.queries[-1].endswith("name contains 'Bob\\'s \\\\'")
+
+    with pytest.raises(ValueError):
+        gdrive.browse(drive, "x' or '1'='1")
+
+
+def test_browse_caps_long_listings(drive, monkeypatch):
+    monkeypatch.setattr(gdrive, "BROWSE_LIMIT", 3)
+    for i in range(5):
+        drive.add(f"many{i:08d}", f"Folder {i}", gdrive.FOLDER, parent="root")
+    r = gdrive.browse(drive, "root")
+    assert len(r["folders"]) == 3 and r["truncated"] is True
+
+
+def test_choose_folder_by_browsing(oauth, drive):
+    c, google, sessions, saved = oauth
+    c.put("/api/gdrive/client", json={"client_id": CLIENT_ID, "client_secret": SECRET})
+    assert c.get("/api/gdrive/folders").status_code == 400  # not signed in yet
+    q = _start(c, google)
+    _callback(c, state=q["state"], code="good-code")
+
+    r = c.get("/api/gdrive/folders").json()  # My Drive
+    assert r["folders"] == [{"id": ROOT, "name": "Policies"}]
+    r = c.get("/api/gdrive/folders", params={"parent": ROOT}).json()
+    assert r["folders"] == [{"id": "sub1", "name": "HR"}] and r["files"]["supported"] == 5
+    assert c.get("/api/gdrive/folders", params={"q": "  hr "}).json()["folders"] == [{"id": "sub1", "name": "HR"}]
+    assert c.get("/api/gdrive/folders", params={"parent": "../etc"}).status_code == 400
+
+    # Choosing sends the folder's id; the server checks it and remembers its name.
+    st = c.put("/api/gdrive/folder", json={"folder": "sub1aaaaaaaa"}).status_code
+    assert st == 400  # unknown id
+    drive.files["sub1aaaaaaaa"] = drive.files.pop("sub1")  # a realistic-length id
+    for f in drive.files.values():
+        if f["parent"] == "sub1":
+            f["parent"] = "sub1aaaaaaaa"
+    st = c.put("/api/gdrive/folder", json={"folder": "sub1aaaaaaaa"}).json()
+    assert st["folder"] == "sub1aaaaaaaa" and st["folder_name"] == "HR"
+    assert len(sessions) == 1  # one Google session reused across all those calls
+
+    c.post("/api/gdrive/sync")
+    st = _wait(c)
+    assert st["state"] == "done" and st["sync"]["downloaded"] == ["Benefits.md"]
+
+
+def test_no_browsing_when_the_server_sets_the_folder(drive, tmp_path, monkeypatch):
+    c = _client(tmp_path, monkeypatch, drive)
+    assert c.get("/api/gdrive/folders").status_code == 409

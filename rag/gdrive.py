@@ -28,6 +28,7 @@ from typing import Any, Callable, Protocol
 
 SCOPE = "https://www.googleapis.com/auth/drive.readonly"
 API = "https://www.googleapis.com/drive/v3/files"
+DRIVES_API = "https://www.googleapis.com/drive/v3/drives"
 STATE_FILE = ".gdrive.json"
 MAX_BYTES = 50 * 1024 * 1024
 
@@ -98,6 +99,45 @@ def drive_session(credentials: str | Path | None = None) -> Session:
     return AuthorizedSession(creds)
 
 
+class _OAuthSession:
+    """An AuthorizedSession that reports a dead refresh token (revoked, expired) as a DriveError."""
+
+    def __init__(self, session: Any):
+        self._session = session
+
+    def get(self, url: str, params: dict[str, Any] | None = None, timeout: float | None = None) -> Any:
+        from google.auth.exceptions import RefreshError
+
+        try:
+            return self._session.get(url, params=params, timeout=timeout)
+        except RefreshError as e:
+            code = str(e.args[0] if e.args else e).split(":")[0].strip()  # e.g. "invalid_grant"
+            if code == "invalid_client":
+                raise DriveError("Google rejected the OAuth client ID or secret - disconnect, then enter them "
+                                 "again") from e
+            raise DriveError(f"Google sign-in has expired or was revoked ({code}) - connect Google Drive again") from e
+
+
+def oauth_session(client_id: str, client_secret: str, refresh_token: str, token_uri: str) -> Session:
+    """A read-only Drive session for an account that signed in with Google (see server/gdrive_connect.py)."""
+    from google.auth.transport.requests import AuthorizedSession
+    from google.oauth2.credentials import Credentials
+
+    creds = Credentials(None, refresh_token=refresh_token, token_uri=token_uri, client_id=client_id,
+                        client_secret=client_secret, scopes=[SCOPE])
+    return _OAuthSession(AuthorizedSession(creds))
+
+
+def folder_info(session: Session, folder: str) -> dict[str, Any]:
+    """The folder's Drive metadata (id, name, mimeType); DriveError if it's missing, not shared or not a folder."""
+    fid = folder_id(folder)
+    meta = _get_json(session, f"{API}/{fid}", {"fields": "id, name, mimeType", "supportsAllDrives": "true"},
+                     f"folder {fid}")
+    if meta.get("mimeType") != FOLDER:
+        raise DriveError(f"{meta.get('name') or fid} is not a folder ({meta.get('mimeType')})")
+    return meta
+
+
 def last_sync(dest: Path) -> dict[str, Any] | None:
     """The last sync's report (as saved in the state file), or None if this folder was never synced."""
     state = _load_state(dest)
@@ -126,26 +166,79 @@ def _get_json(session: Session, url: str, params: dict[str, Any], what: str) -> 
     return _check(session.get(url, params=params, timeout=60), what).json()
 
 
-def _list_children(session: Session, parent: str) -> list[dict[str, Any]]:
+def _list(session: Session, q: str, what: str, limit: int | None = None) -> tuple[list[dict[str, Any]], bool]:
+    """files.list over My Drive, shared-with-me and shared drives: (files, whether `limit` cut it short)."""
     out: list[dict[str, Any]] = []
+    # corpora=allDrives: the default ("user") leaves out items that live in shared drives.
     params: dict[str, Any] = {
-        "q": f"'{parent}' in parents and trashed = false", "fields": _FIELDS, "pageSize": 1000,
-        "supportsAllDrives": "true", "includeItemsFromAllDrives": "true", "orderBy": "name",
+        "q": q, "fields": _FIELDS, "pageSize": 1000, "orderBy": "folder, name_natural",
+        "supportsAllDrives": "true", "includeItemsFromAllDrives": "true", "corpora": "allDrives",
     }
     while True:
-        page = _get_json(session, API, params, f"folder {parent}")
+        page = _get_json(session, API, params, what)
         out += page.get("files", [])
+        if limit is not None and len(out) >= limit:
+            return out[:limit], len(out) > limit or bool(page.get("nextPageToken"))
         if not page.get("nextPageToken"):
-            return out
+            return out, False
         params["pageToken"] = page["nextPageToken"]
+
+
+def _list_children(session: Session, parent: str) -> list[dict[str, Any]]:
+    return _list(session, f"'{parent}' in parents and trashed = false", f"folder {parent}")[0]
+
+
+# ---------------------------------------------------------------- choosing a folder
+
+# Where browsing starts. Each lists folders to open or choose; none of them can be synced as a whole.
+LOCATIONS = {"root": "My Drive", "shared": "Shared with me", "drives": "Shared drives"}
+BROWSE_LIMIT = 500
+
+
+def _quote(text: str) -> str:
+    """A string literal for a Drive query."""
+    return "'" + text.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def browse(session: Session, parent: str = "root", search: str | None = None) -> dict[str, Any]:
+    """What the folder picker shows: the folders in `parent` (a folder id, or a LOCATIONS key), or the
+    folders whose name contains `search` anywhere the account can see.
+
+    Inside a folder, `files` counts the files directly in it and how many of those a sync would
+    download, so the user can tell they found the right one.
+    """
+    if search:
+        q = f"mimeType = '{FOLDER}' and trashed = false and name contains {_quote(search)}"
+        items, more = _list(session, q, "folder search", BROWSE_LIMIT)
+        return {"folders": [{"id": f["id"], "name": f["name"]} for f in items], "files": None, "truncated": more}
+    if parent == "drives":
+        drives: list[dict[str, Any]] = []
+        params: dict[str, Any] = {"pageSize": 100, "fields": "nextPageToken, drives(id, name)"}
+        while len(drives) < BROWSE_LIMIT:
+            page = _get_json(session, DRIVES_API, params, "shared drives")
+            drives += page.get("drives", [])
+            if not page.get("nextPageToken"):
+                break
+            params["pageToken"] = page["nextPageToken"]
+        drives.sort(key=lambda d: d["name"].casefold())
+        return {"folders": [{"id": d["id"], "name": d["name"]} for d in drives[:BROWSE_LIMIT]], "files": None,
+                "truncated": len(drives) > BROWSE_LIMIT}
+    if parent == "shared":
+        q = f"sharedWithMe = true and mimeType = '{FOLDER}' and trashed = false"
+    else:
+        pid = "root" if parent == "root" else folder_id(parent)
+        q = f"'{pid}' in parents and trashed = false"
+    items, more = _list(session, q, f"folder {parent}", BROWSE_LIMIT)
+    folders = [{"id": f["id"], "name": f["name"]} for f in items if f["mimeType"] == FOLDER]
+    files = [f for f in items if f["mimeType"] != FOLDER]
+    counts = None if parent in LOCATIONS else {
+        "total": len(files), "supported": sum(_extension(f) is not None for f in files)}
+    return {"folders": folders, "files": counts, "truncated": more}
 
 
 def _walk(session: Session, root: str) -> list[tuple[list[str], dict[str, Any]]]:
     """Every non-folder item under `root`, with the names of the folders leading to it."""
-    meta = _get_json(session, f"{API}/{root}", {"fields": "id, name, mimeType", "supportsAllDrives": "true"},
-                     f"folder {root}")
-    if meta.get("mimeType") != FOLDER:
-        raise DriveError(f"{root} is not a folder ({meta.get('mimeType')})")
+    folder_info(session, root)
     items: list[tuple[list[str], dict[str, Any]]] = []
     seen = {root}
     stack: list[tuple[list[str], str]] = [([], root)]

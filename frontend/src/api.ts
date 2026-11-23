@@ -1,5 +1,5 @@
 import type {
-  AuthStatus, ChatEvent, ChunkView, ConversationSummary, DocChunks, DocumentsResponse, Estimate, EvalJob, EvalRequest, EvalRow,
+  AuthStatus, ChatEvent, ChunkView, ConversationSummary, DocChunks, DocumentsResponse, DriveFolders, DriveStatus, Estimate, EvalJob, EvalRequest, EvalRow,
   EvalRun, EvalSet, ExportResult, Feedback, FeedbackRecord, Health, IngestState, SearchResponse, Settings, Turn,
   UploadResponse,
 } from "./types";
@@ -69,6 +69,15 @@ export const api = {
       .then(json<IngestState>),
   ingestStatus: () => fetch("/api/ingest").then(json<IngestState>),
   syncDrive: () => fetch("/api/gdrive/sync", send("POST")).then(json<IngestState>),
+  drive: () => fetch("/api/gdrive").then(json<DriveStatus>),
+  setDriveClient: (client_id: string, client_secret: string) =>
+    fetch("/api/gdrive/client", send("PUT", { client_id, client_secret })).then(json<DriveStatus>),
+  connectDrive: () => fetch("/api/gdrive/connect", send("POST")).then(json<{ url: string }>),
+  driveFolders: (p: { parent?: string; q?: string }) =>
+    fetch(`/api/gdrive/folders?${new URLSearchParams({ parent: p.parent ?? "root", q: p.q ?? "" })}`).then(json<DriveFolders>),
+  setDriveFolder: (folder: string) => fetch("/api/gdrive/folder", send("PUT", { folder })).then(json<DriveStatus>),
+  disconnectDrive: () => fetch("/api/gdrive/account", { method: "DELETE" }).then(json<DriveStatus>),
+  dismissDriveError: () => fetch("/api/gdrive/error", { method: "DELETE" }).then(json<DriveStatus>),
   search: (p: { q: string; k: number; mode: string; rerank: boolean }) =>
     fetch(`/api/search?${new URLSearchParams({ q: p.q, k: String(p.k), mode: p.mode, rerank: String(p.rerank) })}`)
       .then(json<SearchResponse>),

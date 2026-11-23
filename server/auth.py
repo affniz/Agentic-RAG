@@ -39,8 +39,11 @@ COOKIE = "rag_session"
 SESSION_DAYS = 30
 MAX_FAILURES = 10
 FAILURE_WINDOW = 15 * 60
-# Reachable without a session: the login flow itself and a liveness probe for Docker's HEALTHCHECK.
-PUBLIC_PATHS = frozenset({"/api/auth/status", "/api/auth/login", "/api/auth/logout", "/api/ping"})
+# Reachable without a session: the login flow itself, a liveness probe for Docker's HEALTHCHECK, and
+# Google's redirect back after "Connect Google Drive" (a cross-site navigation, so the SameSite=Strict
+# cookie isn't sent; it is guarded by its single-use state instead - see server/gdrive_connect.py).
+PUBLIC_PATHS = frozenset({"/api/auth/status", "/api/auth/login", "/api/auth/logout", "/api/ping",
+                          "/api/gdrive/oauth/callback"})
 
 
 class Auth:
