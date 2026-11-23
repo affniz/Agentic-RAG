@@ -54,7 +54,7 @@ jobs:
     name: Docker image
     needs: [tests, frontend]
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60  # the arm64 image is built under QEMU on pushes to main
     permissions:
       contents: read
       packages: write  # push to ghcr.io on main only
@@ -91,12 +91,23 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Push to GHCR
+      # One tag for both architectures, so `docker pull` works on Apple Silicon and ARM servers.
+      # arm64 is emulated (QEMU): slower, so it runs only here, not on pull requests.
+      - name: Set up QEMU (arm64)
+        if: steps.meta.outcome == 'success'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+      - name: Push to GHCR (linux/amd64 + linux/arm64)
         if: steps.meta.outcome == 'success'
         uses: docker/build-push-action@v6
         with:
           context: .
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
+          cache-from: |
+            type=gha
+            type=gha,scope=multiarch
+          cache-to: type=gha,mode=max,scope=multiarch

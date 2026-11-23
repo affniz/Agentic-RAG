@@ -138,7 +138,8 @@ docker run -p 127.0.0.1:8000:8000 -e ANTHROPIC_API_KEY -v rag-data:/data agentic
 1. **Python tests:** `pytest`; no API key needed.
 2. **Frontend:** type-check and production build.
 3. **Docker image:** builds the image and runs the smoke test. On pushes to `main` it also publishes
-   `ghcr.io/<owner>/<repo>:latest` and `:sha-<commit>` to the GitHub Container Registry.
+   `ghcr.io/<owner>/<repo>:latest` and `:sha-<commit>` to the GitHub Container Registry, for both
+   `linux/amd64` and `linux/arm64` (Apple Silicon, ARM servers); the arm64 image is built under QEMU.
 
 ## Evaluation
 
