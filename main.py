@@ -1,6 +1,7 @@
 """CLI for the agentic RAG system.
 
     python main.py ingest [docs_dir] [--rebuild]   sync the index with a folder (only changed files are re-embedded)
+    python main.py gdrive [folder id or URL]       mirror a Google Drive folder into docs/gdrive, then ingest
     python main.py search "query" [--mode ...]     test retrieval only (no API call)
     python main.py ask "question"                  one-shot question
     python main.py chat                            interactive multi-turn chat
@@ -12,6 +13,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 import anthropic
@@ -48,6 +50,16 @@ def main() -> None:
     s.add_argument("--ocr", action="store_true",
                    help="transcribe scanned PDFs (no text layer) with Claude - sends those PDFs to the API")
 
+    s = sub.add_parser("gdrive", help="sync documents from a Google Drive folder, then ingest")
+    s.add_argument("folder", nargs="?", default=os.environ.get("RAG_GDRIVE_FOLDER"),
+                   help="folder id or URL (default: $RAG_GDRIVE_FOLDER)")
+    s.add_argument("--docs", default="docs", help="documents folder to ingest (default: docs)")
+    s.add_argument("--dir", default=os.environ.get("RAG_GDRIVE_DIR", "gdrive"),
+                   help="subfolder of --docs the Drive files are mirrored into (default: gdrive)")
+    s.add_argument("--credentials", default=os.environ.get("RAG_GDRIVE_CREDENTIALS"),
+                   help="service account key file (default: $RAG_GDRIVE_CREDENTIALS, else Application Default Credentials)")
+    s.add_argument("--no-ingest", action="store_true", help="only download; don't update the index")
+
     s = sub.add_parser("search")
     s.add_argument("query")
     s.add_argument("-k", type=int, default=5)
@@ -83,9 +95,13 @@ def main() -> None:
         from rag.ocr import claude_pdf_transcriber
 
         ocr = claude_pdf_transcriber()
+    if args.cmd == "gdrive":
+        if not sync_gdrive(args):
+            return
+        args.docs_dir, args.rebuild, args.ocr = args.docs, False, False
     kb = KnowledgeBase(args.index, rerank=not args.no_rerank, pdf_ocr=ocr)
 
-    if args.cmd == "ingest":
+    if args.cmd in ("ingest", "gdrive"):
         try:
             r = kb.ingest(args.docs_dir, rebuild=args.rebuild)
         except FileNotFoundError as e:
@@ -148,6 +164,38 @@ def main() -> None:
         sys.exit(f"API error {e.status_code}: {e.message}")
     except anthropic.APIConnectionError:
         sys.exit("Could not reach the Anthropic API.")
+
+
+def sync_gdrive(args: argparse.Namespace) -> bool:
+    """Mirror the Drive folder into the docs folder. Returns whether to ingest afterwards."""
+    from pathlib import Path
+
+    from rag import gdrive
+
+    if not args.folder:
+        sys.exit("Give a Drive folder id or URL, or set RAG_GDRIVE_FOLDER.")
+    docs = Path(args.docs).resolve()
+    dest = (docs / args.dir).resolve()
+    if not dest.is_relative_to(docs) or dest == docs:
+        sys.exit("--dir must be a subfolder of the documents folder.")
+
+    def progress(stage: str, done: int, total: int) -> None:
+        if stage == "listing":
+            print("Listing the Drive folder...")
+        elif stage == "downloading" and total and done < total:
+            print(f"  downloading {done + 1}/{total}", end="\r", flush=True)
+
+    try:
+        r = gdrive.sync_folder(gdrive.drive_session(args.credentials), args.folder, dest, on_progress=progress)
+    except (gdrive.DriveError, ValueError) as e:
+        sys.exit(f"Google Drive sync failed: {e}")
+    print(f"Drive: {len(r.downloaded)} downloaded, {len(r.removed)} removed, {r.unchanged} unchanged"
+          f" -> {dest.relative_to(Path.cwd()) if dest.is_relative_to(Path.cwd()) else dest}")
+    for name, reason in r.skipped.items():
+        print(f"  skipped {name}: {reason}")
+    for name, reason in r.failed.items():
+        print(f"  failed {name}: {reason} (the previous copy, if any, is kept)")
+    return not args.no_ingest
 
 
 def run_eval(args: argparse.Namespace, model: str) -> None:

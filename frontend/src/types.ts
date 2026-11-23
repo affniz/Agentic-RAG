@@ -126,6 +126,17 @@ export type IngestState = {
   finished_at?: number;
   error?: string;
   report?: { added: string[]; updated: string[]; removed: string[]; unchanged: number; chunks: number; empty?: string[]; failed?: Record<string, string>; embedded?: number };
+  sync?: DriveSyncReport; // set when the job was a Google Drive sync
+};
+
+export type DriveSyncReport = {
+  folder: string;
+  downloaded: string[];
+  removed: string[];
+  unchanged: number;
+  skipped: Record<string, string>; // Drive path: why it isn't synced
+  failed: Record<string, string>; // Drive path: error (the previous copy is kept)
+  finished_at: number;
 };
 
 export type DocumentsResponse = {
@@ -134,6 +145,7 @@ export type DocumentsResponse = {
   ingest: IngestState;
   needs_ingest: boolean;
   ocr: boolean;
+  gdrive: { folder: string; dir: string; last_sync: DriveSyncReport | null } | null; // null: not configured
 };
 
 export type UploadResponse = {

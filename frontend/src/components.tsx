@@ -24,6 +24,7 @@ export const Icon = {
   upload: (c?: string) => svg(<path d="M12 16V4M7 9l5-5 5 5M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3" />, c),
   refresh: (c?: string) => svg(<path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7" />, c),
   chat: (c?: string) => svg(<path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z" />, c),
+  cloud: (c?: string) => svg(<path d="M7 18a4.5 4.5 0 0 1-.6-9 6 6 0 0 1 11.5 1.5A3.8 3.8 0 0 1 17.5 18z" />, c),
   folder: (c?: string) => svg(<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />, c),
   thumbUp: (c?: string) => svg(<path d="M7 10v11H4a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1zm0 0 4-7a2.5 2.5 0 0 1 3 3l-1 4h6a2 2 0 0 1 2 2.3l-1.4 7A2 2 0 0 1 17.6 21H7" />, c),
   thumbDown: (c?: string) => svg(<path d="M17 14V3h3a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1zm0 0-4 7a2.5 2.5 0 0 1-3-3l1-4H5a2 2 0 0 1-2-2.3l1.4-7A2 2 0 0 1 6.4 3H17" />, c),

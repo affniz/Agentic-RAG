@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type DragEvent } from "react";
 import { api } from "./api";
 import { Icon } from "./components";
-import type { DocChunks, DocStatus, DocumentRow, DocumentsResponse, Health, IngestState, SearchResponse } from "./types";
+import type { DocChunks, DocStatus, DocumentRow, DocumentsResponse, DriveSyncReport, Health, IngestState, SearchResponse } from "./types";
 
 // ---------------------------------------------------------------- helpers
 
@@ -99,6 +99,15 @@ export function DocumentsPage({ health, onIndexChanged }: { health: Health | nul
     }
   }
 
+  async function syncDrive() {
+    setError(null);
+    try {
+      setIngest(await api.syncDrive());
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
+
   async function remove(name: string) {
     setError(null);
     try {
@@ -145,7 +154,14 @@ export function DocumentsPage({ health, onIndexChanged }: { health: Health | nul
                 {data ? `${docs.filter((d) => d.status !== "deleted").length} documents · ${data.chunks} chunks indexed` : "Loading…"}
               </p>
             </div>
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
+              {data?.gdrive && (
+                <button className={btnSecondary} onClick={syncDrive} disabled={running}
+                  title={`Download new and changed files from the Google Drive folder into ${data.gdrive.dir}/, then index them${
+                    data.gdrive.last_sync ? ` (last synced ${when(data.gdrive.last_sync.finished_at)})` : ""}`}>
+                  {Icon.cloud()} Sync Google Drive
+                </button>
+              )}
               <button className={btnSecondary} onClick={() => reindex(true)} disabled={running}
                 title="Re-embed every document from scratch">Rebuild all</button>
               <button className={data?.needs_ingest ? btnPrimary : btnSecondary} onClick={() => reindex(false)} disabled={running}
@@ -221,6 +237,8 @@ function IngestBanner({ ingest }: { ingest: IngestState }) {
     const pct = total ? Math.round(((ingest.done ?? 0) / total) * 100) : 0;
     const label = ingest.stage === "transcribing"
       ? `Claude is transcribing ${ingest.file ?? "the PDF"} - this can take a minute for long files`
+      : ingest.stage === "listing" ? "Listing the Google Drive folder"
+      : ingest.stage === "downloading" ? `Downloading ${Math.min((ingest.done ?? 0) + 1, total)} of ${total} files from Google Drive`
       : ingest.stage === "embedding"
         ? `Embedding ${ingest.done ?? 0} of ${total} chunks`
         : ingest.stage === "reading" ? `Reading ${ingest.done ?? 0} of ${total} files` : "Starting…";
@@ -228,34 +246,57 @@ function IngestBanner({ ingest }: { ingest: IngestState }) {
       <div className="mt-4 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2.5 dark:border-indigo-900 dark:bg-indigo-950/40" role="status">
         <div className="flex items-center gap-2 text-sm text-indigo-800 dark:text-indigo-300">{Icon.spinner()} Indexing - {label}</div>
         <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-indigo-100 dark:bg-indigo-900">
-          <div className="h-full rounded-full bg-indigo-600 transition-all" style={{ width: `${ingest.stage === "embedding" ? pct : 5}%` }} />
+          <div className="h-full rounded-full bg-indigo-600 transition-all" style={{ width: `${ingest.stage === "embedding" || ingest.stage === "downloading" ? pct : 5}%` }} />
         </div>
       </div>
     );
   }
-  if (ingest.state === "error") return <Alert tone="error">Indexing failed: {ingest.error}</Alert>;
+  if (ingest.state === "error") {
+    return <Alert tone="error">{ingest.reason === "gdrive" ? "Google Drive sync" : "Indexing"} failed: {ingest.error}</Alert>;
+  }
   if (ingest.state === "done" && ingest.report && ingest.finished_at && Date.now() / 1000 - ingest.finished_at < 600) {
-    const r = ingest.report;
-    const parts = [r.added.length && `${r.added.length} added`, r.updated.length && `${r.updated.length} updated`,
-      r.removed.length && `${r.removed.length} removed`, r.empty?.length && `${r.empty.length} with no text`].filter(Boolean);
-    const failed = Object.entries(r.failed ?? {});
-    if (failed.length) {
-      return (
-        <Alert tone="error">
-          {failed.length === 1 ? "1 file was" : `${failed.length} files were`} skipped; the rest is indexed{parts.length ? ` (${parts.join(", ")})` : ""}. A skipped file that was indexed before stays searchable in its previous version.
-          <ul className="mt-1 list-disc pl-5">
-            {failed.map(([name, reason]) => <li key={name}><span className="font-medium">{name}</span>: {reason}</li>)}
-          </ul>
-        </Alert>
-      );
-    }
-    return (
-      <div className="mt-4 flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-300" role="status">
-        {Icon.check()} Index up to date{parts.length ? `: ${parts.join(", ")}` : " - nothing changed"}. {r.chunks} chunks{r.embedded ? ` (${r.embedded} newly embedded)` : ""}.
-      </div>
-    );
+    return <>{ingest.sync && <DriveSyncSummary sync={ingest.sync} />}<IndexSummary report={ingest.report} /></>;
   }
   return null;
+}
+
+function DriveSyncSummary({ sync }: { sync: DriveSyncReport }) {
+  const parts = [sync.downloaded.length && `${sync.downloaded.length} downloaded`, sync.removed.length && `${sync.removed.length} removed`,
+    `${sync.unchanged} unchanged`].filter(Boolean);
+  const problems = [...Object.entries(sync.failed).map(([n, r]) => [n, `failed: ${r}`]),
+    ...Object.entries(sync.skipped).map(([n, r]) => [n, `skipped: ${r}`])];
+  return (
+    <Alert tone={Object.keys(sync.failed).length ? "error" : "info"}>
+      Google Drive: {parts.join(", ")}.
+      {problems.length > 0 && (
+        <ul className="mt-1 list-disc pl-5">
+          {problems.map(([name, reason]) => <li key={name}><span className="font-medium">{name}</span> {reason}</li>)}
+        </ul>
+      )}
+    </Alert>
+  );
+}
+
+function IndexSummary({ report }: { report: NonNullable<IngestState["report"]> }) {
+  const r = report;
+  const parts = [r.added.length && `${r.added.length} added`, r.updated.length && `${r.updated.length} updated`,
+    r.removed.length && `${r.removed.length} removed`, r.empty?.length && `${r.empty.length} with no text`].filter(Boolean);
+  const failed = Object.entries(r.failed ?? {});
+  if (failed.length) {
+    return (
+      <Alert tone="error">
+        {failed.length === 1 ? "1 file was" : `${failed.length} files were`} skipped; the rest is indexed{parts.length ? ` (${parts.join(", ")})` : ""}. A skipped file that was indexed before stays searchable in its previous version.
+        <ul className="mt-1 list-disc pl-5">
+          {failed.map(([name, reason]) => <li key={name}><span className="font-medium">{name}</span>: {reason}</li>)}
+        </ul>
+      </Alert>
+    );
+  }
+  return (
+    <div className="mt-4 flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-300" role="status">
+      {Icon.check()} Index up to date{parts.length ? `: ${parts.join(", ")}` : " - nothing changed"}. {r.chunks} chunks{r.embedded ? ` (${r.embedded} newly embedded)` : ""}.
+    </div>
+  );
 }
 
 function EmptyFilesNotice({ docs, ocr, onReindex, onTranscribe }: {

@@ -68,6 +68,7 @@ export const api = {
     fetch("/api/ingest", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ rebuild }) })
       .then(json<IngestState>),
   ingestStatus: () => fetch("/api/ingest").then(json<IngestState>),
+  syncDrive: () => fetch("/api/gdrive/sync", send("POST")).then(json<IngestState>),
   search: (p: { q: string; k: number; mode: string; rerank: boolean }) =>
     fetch(`/api/search?${new URLSearchParams({ q: p.q, k: String(p.k), mode: p.mode, rerank: String(p.rerank) })}`)
       .then(json<SearchResponse>),

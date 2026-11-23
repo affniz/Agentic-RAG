@@ -8,3 +8,6 @@ frontend/dist/
 .rag_index_eval_*/
 frontend/*.tsbuildinfo
 .rag_data/
+
+# Files synced from Google Drive (python main.py gdrive / Sync Google Drive)
+docs/gdrive/
