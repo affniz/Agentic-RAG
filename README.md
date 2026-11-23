@@ -26,6 +26,7 @@ question ─► Claude (claude-haiku-5-5) ──tool calls──► list_documen
 | `evals/basic`, `evals/hard`, `evals/holdout` | Eval sets: questions with evidence snippets, expected sources and reference answers, plus the hard set's own documents |
 | `main.py` | CLI |
 | `server/app.py` | FastAPI backend for the web UI: streaming chat over Server-Sent Events, conversations (saved to disk by `server/conversations.py`), chunk lookup for citations, settings, feedback; `server/security.py` limits it to localhost and `server/auth.py` adds an optional password login |
+| `server/gdrive_connect.py` | "Connect Google Drive" from the Documents screen: Google sign-in (OAuth with PKCE), folder choice, saved connection |
 | `server/documents.py`, `server/evals.py`, `server/feedback.py` | Documents API; eval runner (background jobs, cost estimate, run history); settings and feedback storage and export |
 | `frontend/` | React + Vite + Tailwind chat UI |
 | `rag/fake_llm.py` | Stand-in Claude client for tests and for running the UI with no API key (demo mode) |
@@ -88,10 +89,28 @@ python main.py gdrive "https://drive.google.com/drive/folders/1AbC..." --credent
 
 `--no-ingest` only downloads; `--dir` changes the subfolder of `docs/`.
 
-**Sync from the web UI:** start the server with `RAG_GDRIVE_FOLDER` (id or URL) and, for a service account,
-`RAG_GDRIVE_CREDENTIALS=key.json`. The Documents screen then has a **Sync Google Drive** button that downloads
-the changes, indexes them and shows what was downloaded, removed or skipped. Synced files appear in the file
-list under `gdrive/`. `RAG_GDRIVE_DIR` changes the subfolder (it must be inside `RAG_DOCS`).
+**Connect from the web UI** (no restart, no environment variables): the Documents screen has a **Google Drive**
+panel.
+
+1. **One-time setup:** click **Set up Google sign-in** and follow the steps it shows: in Google Cloud, enable the
+   Google Drive API, set up Google Auth Platform (audience *External*, and add the Google accounts that will connect
+   as *test users*), and create an OAuth client of type *Web application* with the redirect URI the panel shows
+   (`http://localhost:8000/api/gdrive/oauth/callback` for a local server). Paste the client ID and secret. They can
+   instead be set with `RAG_GDRIVE_CLIENT_ID` / `RAG_GDRIVE_CLIENT_SECRET`, which then can't be changed in the UI.
+2. **Connect Google Drive** opens Google's sign-in (read-only Drive access). Google warns that the app isn't
+   verified, since it's your own client: choose *Continue*, and tick the Google Drive permission.
+3. **Choose the folder** in the panel's folder browser: *My Drive*, *Shared with me* or *Shared drives*, open
+   folders to go deeper (each shows how many of its files can be synced), or search folders by name. Clicking
+   **Sync** on a folder saves it and syncs it straight away: changes are downloaded, indexed, and the panel shows
+   what was downloaded, removed or skipped. Synced files appear in the file list under `gdrive/`. **Sync now**
+   fetches later changes; **Change folder** opens the browser again.
+
+The client secret and the sign-in's refresh token are stored in `RAG_DATA/gdrive.json` (owner-only) and never sent
+to the browser. **Disconnect** revokes access at Google; files already synced stay. See `server/gdrive_connect.py`.
+
+**Or set the folder on the server:** start it with `RAG_GDRIVE_FOLDER` (id or URL) and, for a service account,
+`RAG_GDRIVE_CREDENTIALS=key.json`; the panel then only offers **Sync now**. `RAG_GDRIVE_DIR` changes the subfolder
+Drive files go into (it must be inside `RAG_DOCS`).
 
 ## Web UI
 

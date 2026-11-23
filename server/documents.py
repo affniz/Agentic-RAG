@@ -128,9 +128,10 @@ def _pdf_pages(path: Path) -> int | None:
 
 
 def make_router(kb: KnowledgeBase, docs_dir: Path, transcriber: Callable[[], Transcriber],
-                drive: DriveSync | None = None) -> APIRouter:
+                drive_sync: Callable[[], DriveSync | None] = lambda: None) -> APIRouter:
     """transcriber: returns the function that turns a PDF into text (created on first use).
-    drive: the Google Drive folder that POST /api/gdrive/sync mirrors, if one is configured."""
+    drive_sync: the Google Drive folder that POST /api/gdrive/sync mirrors right now, if one is set up
+    (it can be connected while the server runs, so it's looked up on each request)."""
     docs_dir.mkdir(parents=True, exist_ok=True)
     root = docs_dir.resolve()
     job = IngestJob(kb, docs_dir)
@@ -152,6 +153,7 @@ def make_router(kb: KnowledgeBase, docs_dir: Path, transcriber: Callable[[], Tra
         # Snapshot the job state first: if an ingest finishes while we build the list, the client
         # still sees "running" and polls again, instead of pairing "done" with a stale list.
         ingest_state = dict(job.state)
+        drive = drive_sync()
         indexed = kb.indexed_files()
         indexed_at = kb.indexed_times()
         errors = kb.index_errors()
@@ -277,8 +279,9 @@ def make_router(kb: KnowledgeBase, docs_dir: Path, transcriber: Callable[[], Tra
     @router.post("/gdrive/sync")
     def gdrive_sync() -> dict[str, Any]:
         """Mirror the configured Drive folder into the documents folder, then index what changed."""
+        drive = drive_sync()
         if drive is None:
-            raise HTTPException(404, "Google Drive isn't configured - set RAG_GDRIVE_FOLDER and restart the server")
+            raise HTTPException(404, "Google Drive isn't set up - connect it and choose a folder on the Documents screen")
 
         def run(progress: Progress) -> dict[str, Any]:
             report = gdrive.sync_folder(drive.session(), drive.folder, drive.dest, on_progress=progress)
