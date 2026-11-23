@@ -24,7 +24,7 @@ question ─► Claude (claude-haiku-5-5) ──tool calls──► list_documen
 | `rag/models.py` | Model prices (incl. Haiku's long-prompt tier) and per-model request options such as the refusal fallback |
 | `evals/basic`, `evals/hard`, `evals/holdout` | Eval sets: questions with evidence snippets, expected sources and reference answers, plus the hard set's own documents |
 | `main.py` | CLI |
-| `server/app.py` | FastAPI backend for the web UI: streaming chat over Server-Sent Events, conversations (saved to disk by `server/conversations.py`), chunk lookup for citations, settings, feedback; `server/security.py` limits it to localhost |
+| `server/app.py` | FastAPI backend for the web UI: streaming chat over Server-Sent Events, conversations (saved to disk by `server/conversations.py`), chunk lookup for citations, settings, feedback; `server/security.py` limits it to localhost and `server/auth.py` adds an optional password login |
 | `server/documents.py`, `server/evals.py`, `server/feedback.py` | Documents API; eval runner (background jobs, cost estimate, run history); settings and feedback storage and export |
 | `frontend/` | React + Vite + Tailwind chat UI |
 | `rag/fake_llm.py` | Stand-in Claude client for tests and for running the UI with no API key (demo mode) |
@@ -104,7 +104,8 @@ models without touching chat. Each run records the settings it used.
 - **Encrypted PDFs** that open without a password (common for official documents) are read normally. A PDF that needs a password, or any file that can't be read, is skipped with the reason shown in the Documents table; the rest of the folder is still indexed.
 - Other settings: `RAG_DOCS` (documents folder, default `./docs`), `RAG_INDEX` (index directory), `RAG_RERANK=0` (turn off the reranker), `RAG_DATA` (settings, feedback and eval-set indexes, default `./.rag_data`), `RAG_EVALS` (eval sets and results, default `./evals`).
 - Conversations, settings and feedback are saved in `RAG_DATA` (`conversations/<id>.json`), so chats survive a restart. Run a single uvicorn worker per `RAG_DATA` folder, or the processes overwrite each other's files.
-- **Local only:** the server answers only requests addressed to `localhost` / `127.0.0.1` / `[::1]` / `*.localhost`, and refuses writes from other sites (cross-site `Origin` or `Sec-Fetch-Site`), so a web page you visit can't upload, delete or start paid evals. This protects against browsers, not the network: a client that can reach the port can send any `Host` header. There is no login, so keep the port on loopback (`uvicorn` binds to 127.0.0.1 by default; for Docker see below). `RAG_ALLOWED_HOSTS` adds hostnames (comma-separated). See `server/security.py`.
+- **Local only:** the server answers only requests addressed to `localhost` / `127.0.0.1` / `[::1]` / `*.localhost`, and refuses writes from other sites (cross-site `Origin` or `Sec-Fetch-Site`), so a web page you visit can't upload, delete or start paid evals. This protects against browsers, not the network: a client that can reach the port can send any `Host` header. Without a password there is no login, so keep the port on loopback (`uvicorn` binds to 127.0.0.1 by default; for Docker see below). `RAG_ALLOWED_HOSTS` adds hostnames (comma-separated). See `server/security.py`.
+- **Login:** set `RAG_PASSWORD` to require a password: the UI shows a sign-in screen, every API route except the login itself answers 401 without a session, and the sidebar gets **Log out**. With a password set, any hostname is accepted (so you can open it from another device), and writes from other sites are still refused. Sessions are signed cookies (HttpOnly, SameSite=Strict, 30 days) keyed by a secret in `RAG_DATA/session_key`, so they survive restarts. Changing the password, or deleting that file, logs every browser out. After 10 wrong passwords from one address, it must wait 15 minutes. Over plain HTTP the password crosses the network unencrypted, so for anything beyond your own LAN put a TLS proxy in front and run uvicorn with `--proxy-headers` (the cookie is then marked Secure). See `server/auth.py`.
 - In demo mode the eval dashboard works too, with a keyword-matching stand-in judge: free, but the scores mean nothing.
 
 ## Docker
@@ -120,12 +121,14 @@ docker run -p 127.0.0.1:8000:8000 -e ANTHROPIC_API_KEY -v rag-data:/data agentic
 - **Keep the `127.0.0.1:` in `-p`.** Inside the container the server listens on all interfaces, so a plain `-p 8000:8000`
   publishes it on every network interface of your machine. The Host check (see *Local only*) does not stop that:
   any device on your network can send `Host: localhost` and use the API with your key - chat, paid evals, uploads
-  and deletes. Publish on loopback only unless you put an authenticating proxy in front.
+  and deletes. Publish on loopback only unless you set a password (below) or put an authenticating proxy in front.
+- **Password login:** `docker run -p 8000:8000 -e RAG_PASSWORD='a long random passphrase' -e ANTHROPIC_API_KEY -v rag-data:/data agentic-rag`
+  can be published on your network: everything but the sign-in screen needs the password (see *Login* above).
 - **Demo mode** (no API key, real search, fake model): `docker run -p 127.0.0.1:8000:8000 -e RAG_FAKE_LLM=1 agentic-rag`.
 - **Your documents:** mount them over the samples with `-v /path/to/docs:/app/docs`, then click **Re-index** on the Documents screen.
 - **What persists:** the index, settings, feedback and chat conversations live in the `/data` volume. Eval results are written inside the container.
 - **Build without the reranker** (e.g. where Hugging Face is unreachable): `--build-arg BAKE_RERANKER=0`; it is then downloaded on first use, and search works without it if that fails.
-- **Other hostnames:** the server only answers requests addressed to localhost (see *Local only* above). To open it under another name, e.g. on a home server, add `-e RAG_ALLOWED_HOSTS=myhost` - there is still no login, so anyone who can reach the port can use your API key.
+- **Other hostnames:** without a password the server only answers requests addressed to localhost (see *Local only* above). To open it under another name, e.g. on a home server, set `RAG_PASSWORD` (any hostname then works), or add `-e RAG_ALLOWED_HOSTS=myhost` - without a password anyone who can reach the port can use your API key.
 - `scripts/docker_smoke_test.sh [image]` checks a built image end to end in demo mode.
 
 ## CI

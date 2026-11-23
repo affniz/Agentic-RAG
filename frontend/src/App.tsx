@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, streamChat } from "./api";
+import { LOGGED_OUT, api, streamChat } from "./api";
 import { Answer, CitationPanel, Composer, Icon, Sidebar, Steps, type CiteRef, type View } from "./components";
 import { DocumentsPage } from "./documents";
 import { EvalsPage } from "./evals";
+import { LoginPage } from "./login";
 import { SettingsPage, modelLabel } from "./settings";
-import type { ConversationSummary, Feedback, Health, Settings, Turn } from "./types";
+import type { AuthStatus, ConversationSummary, Feedback, Health, Settings, Turn } from "./types";
 
 const SUGGESTIONS = [
   "How many vacation days can I carry over, and when do they expire?",
@@ -22,7 +23,35 @@ const emptyAssistant = (): Turn => ({
   cost_usd: null, seconds: null, stop: null, streaming: true,
 });
 
+/** Shows the login screen when the server asks for a password (RAG_PASSWORD), else the app. */
 export default function App() {
+  const [auth, setAuth] = useState<AuthStatus | null>(null);
+  const [expired, setExpired] = useState(false);
+
+  useEffect(() => {
+    // If the server can't be reached, show the app anyway: it reports the connection error itself.
+    api.authStatus().then(setAuth).catch(() => setAuth({ required: false, authenticated: true }));
+    const onLoggedOut = () => {
+      setExpired(true);
+      setAuth((a) => a && { ...a, authenticated: false });
+    };
+    window.addEventListener(LOGGED_OUT, onLoggedOut);
+    return () => window.removeEventListener(LOGGED_OUT, onLoggedOut);
+  }, []);
+
+  async function logout() {
+    await api.logout().catch(() => {});
+    setExpired(false);
+    setAuth({ required: true, authenticated: false });
+  }
+
+  if (!auth) return null;
+  if (auth.required && !auth.authenticated)
+    return <LoginPage expired={expired} onLogin={() => setAuth({ required: true, authenticated: true })} />;
+  return <Workspace onLogout={auth.required ? logout : undefined} />;
+}
+
+function Workspace({ onLogout }: { onLogout?: () => void }) {
   const [health, setHealth] = useState<Health | null>(null);
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -163,7 +192,7 @@ export default function App() {
       <aside className={`fixed inset-y-0 left-0 z-30 w-72 border-r border-zinc-200 bg-zinc-50 transition-transform dark:border-zinc-800 dark:bg-zinc-900
         md:static md:translate-x-0 ${navOpen ? "translate-x-0" : "-translate-x-full"}`}>
         <Sidebar conversations={conversations} activeId={activeId} health={health} view={view}
-          onNavigate={navigate} onSelect={open} onNew={newChat} onDelete={remove} onReset={resetAll} />
+          onNavigate={navigate} onSelect={open} onNew={newChat} onDelete={remove} onReset={resetAll} onLogout={onLogout} />
       </aside>
       {navOpen && <div className="fixed inset-0 z-20 bg-black/30 md:hidden" onClick={() => setNavOpen(false)} />}
 

@@ -5,11 +5,13 @@
     Settings: RAG_DOCS (documents folder, default ./docs), RAG_INDEX, RAG_RERANK=0,
               RAG_OCR=1 (transcribe scanned PDFs with Claude automatically),
               RAG_DATA (settings, feedback, conversations; default ./.rag_data), RAG_EVALS (eval sets, default ./evals),
-              RAG_ALLOWED_HOSTS (extra hostnames the API answers to, comma-separated; see server/security.py)
+              RAG_ALLOWED_HOSTS (extra hostnames the API answers to, comma-separated; see server/security.py),
+              RAG_PASSWORD (require a login; see server/auth.py)
 
 Chat responses stream as Server-Sent Events. Settings, 👍/👎 feedback and conversations are saved in
 RAG_DATA, so chats survive a restart. Run a single uvicorn worker per RAG_DATA folder.
-Only requests addressed to localhost are answered (server/security.py).
+Only requests addressed to localhost are answered (server/security.py), unless RAG_PASSWORD is set: then
+any hostname is accepted and every API route needs a login (server/auth.py).
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ from pydantic import BaseModel, Field
 
 from rag.agent import MODEL, PRICES, RagAgent, Usage
 from rag.store import KnowledgeBase
+from server import auth as auth_module
 from server import evals
 from server.conversations import ConversationStore
 from server.documents import make_router
@@ -50,8 +53,12 @@ EVALS_DIR = Path(os.environ.get("RAG_EVALS", str(ROOT / "evals")))
 
 log = logging.getLogger(__name__)
 
+auth = auth_module.Auth(os.environ.get("RAG_PASSWORD"), DATA_DIR / "session_key")
 app = FastAPI(title="Agentic RAG")
-app.add_middleware(LocalhostGuard)
+# The last middleware added runs first: reject other hosts and cross-site writes, then check the login.
+app.add_middleware(auth_module.AuthGuard, auth=auth)
+app.add_middleware(LocalhostGuard, any_host=auth.required)
+app.include_router(auth_module.make_router(auth))
 
 
 def _make_ocr() -> Any:

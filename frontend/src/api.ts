@@ -1,5 +1,5 @@
 import type {
-  ChatEvent, ChunkView, ConversationSummary, DocChunks, DocumentsResponse, Estimate, EvalJob, EvalRequest, EvalRow,
+  AuthStatus, ChatEvent, ChunkView, ConversationSummary, DocChunks, DocumentsResponse, Estimate, EvalJob, EvalRequest, EvalRow,
   EvalRun, EvalSet, ExportResult, Feedback, FeedbackRecord, Health, IngestState, SearchResponse, Settings, Turn,
   UploadResponse,
 } from "./types";
@@ -12,12 +12,23 @@ const send = (method: string, body?: unknown): RequestInit => ({
 
 const path = (name: string) => name.split("/").map(encodeURIComponent).join("/");
 
+/** Fired on window when the server answers 401: the session expired or was never there. */
+export const LOGGED_OUT = "rag:logged-out";
+
+function checkSession(res: Response) {
+  if (res.status === 401 && !res.url.includes("/api/auth/")) window.dispatchEvent(new Event(LOGGED_OUT));
+}
+
 async function json<T>(res: Response): Promise<T> {
+  checkSession(res);
   if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail ?? `HTTP ${res.status}`);
   return res.json();
 }
 
 export const api = {
+  authStatus: () => fetch("/api/auth/status").then(json<AuthStatus>),
+  login: (password: string) => fetch("/api/auth/login", send("POST", { password })).then(json<{ ok: boolean }>),
+  logout: () => fetch("/api/auth/logout", send("POST")).then(json<{ ok: boolean }>),
   health: () => fetch("/api/health").then(json<Health>),
   conversations: () => fetch("/api/conversations").then(json<ConversationSummary[]>),
   conversation: (id: string) =>
@@ -73,6 +84,7 @@ export async function* streamChat(
     body: JSON.stringify(body),
     signal,
   });
+  checkSession(res);
   if (!res.ok || !res.body) {
     const detail = (await res.json().catch(() => null))?.detail;
     throw new Error(detail ?? `HTTP ${res.status}`);
