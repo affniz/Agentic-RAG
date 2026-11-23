@@ -129,7 +129,7 @@ docker run -p 127.0.0.1:8000:8000 -e ANTHROPIC_API_KEY -v rag-data:/data agentic
 - **What persists:** the index, settings, feedback and chat conversations live in the `/data` volume. Eval results are written inside the container.
 - **Build without the reranker** (e.g. where Hugging Face is unreachable): `--build-arg BAKE_RERANKER=0`; it is then downloaded on first use, and search works without it if that fails.
 - **Other hostnames:** without a password the server only answers requests addressed to localhost (see *Local only* above). To open it under another name, e.g. on a home server, set `RAG_PASSWORD` (any hostname then works), or add `-e RAG_ALLOWED_HOSTS=myhost` - without a password anyone who can reach the port can use your API key.
-- `scripts/docker_smoke_test.sh [image]` checks a built image end to end in demo mode.
+- `scripts/docker_smoke_test.sh [image]` checks a built image end to end in demo mode, then again with `RAG_PASSWORD` set (health check, API locked until login).
 
 ## CI
 
