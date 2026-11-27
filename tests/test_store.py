@@ -509,3 +509,22 @@ def test_keyword_search_handles_accents_and_scripts_without_spaces(tmp_path):
     assert kb.search("Geschäftsreise", k=1, mode="bm25")[0][0].source == "de.md"
     assert kb.search("有給休暇", k=1, mode="bm25")[0][0].source == "ja.md"
     assert kb.search("London hotel", k=1, mode="bm25")[0][0].source == "en.md"
+
+
+def test_ingest_by_another_instance_is_not_undone(tmp_path):
+    # Two KnowledgeBases on one index folder: the server and the CLI, or the eval runner's two
+    # instances of a set. Re-indexing with the one whose in-memory chunks are older must not
+    # bring the old text back.
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "a.md").write_text("# Policy\n\nThe hotel cap is 100 dollars.\n")
+    first = KnowledgeBase(tmp_path / "idx", rerank=False)
+    first.ingest(docs)
+    second = KnowledgeBase(tmp_path / "idx", rerank=False)
+    (docs / "a.md").write_text("# Policy\n\nThe hotel cap is 250 dollars.\n")
+    second.ingest(docs)
+    r = first.ingest(docs)
+    assert r.updated == [] and r.embedded == 0
+    for kb in (first, KnowledgeBase(tmp_path / "idx", rerank=False)):
+        assert [c.text for c in kb.chunks] == ["The hotel cap is 250 dollars."]
+        assert [c.text for c, _ in kb.search("hotel cap", k=1, mode="vector")] == ["The hotel cap is 250 dollars."]

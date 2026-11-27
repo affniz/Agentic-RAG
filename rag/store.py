@@ -378,9 +378,15 @@ class KnowledgeBase:
             return json.loads(self._manifest_file.read_text())
         return {}
 
+    def _saved_chunks(self) -> list[Chunk]:
+        """The chunk list on disk (empty if there is none)."""
+        if not self._chunks_file.exists():
+            return []
+        return [Chunk(**c) for c in json.loads(self._chunks_file.read_text())]
+
     def _load(self) -> None:
-        if self._chunks_file.exists() and self._manifest().get("version") == INDEX_VERSION:
-            self._index = _Index.build([Chunk(**c) for c in json.loads(self._chunks_file.read_text())])
+        if self._manifest().get("version") == INDEX_VERSION:
+            self._index = _Index.build(self._saved_chunks())
 
     def indexed_files(self) -> dict[str, str]:
         """{relative path: sha256} of the files the index was last built from."""
@@ -421,7 +427,11 @@ class KnowledgeBase:
 
     def _ingest(self, docs_dir: Path, rebuild: bool, progress: ProgressFn, force: set[str]) -> IngestReport:
         manifest = self._manifest()
-        old_chunks = list(self.chunks)
+        # The chunks the manifest describes, read from disk rather than taken from memory: another
+        # KnowledgeBase on this folder (the CLI while the server runs, a second instance in the same
+        # process) may have re-indexed since this one loaded. Pairing that newer manifest with older
+        # in-memory chunks would save the old text again as if it were up to date.
+        old_chunks = self._saved_chunks() if manifest.get("version") == INDEX_VERSION else []
         if rebuild or manifest.get("version") != INDEX_VERSION:
             self._client.delete_collection(COLLECTION)
             self._col = self._get_collection()

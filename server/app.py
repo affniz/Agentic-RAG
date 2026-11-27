@@ -377,12 +377,18 @@ async def chat(req: ChatRequest) -> StreamingResponse:
     conv.agent.max_cost_usd = settings.max_cost_usd
     conv.agent.search.k, conv.agent.search.rerank = settings.search_k, settings.rerank
     conv.turns.append(Turn("user", req.message))
-    return StreamingResponse(_run(conv, req.message), media_type="text/event-stream",
+    # The worker starts now, not when the stream is first read: it is what releases the lock, and a
+    # client that disconnects early may never read the stream at all. The answer is then still saved.
+    return StreamingResponse(_relay(conv, *_start(conv, req.message)), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
-async def _run(conv: Conversation, question: str) -> AsyncIterator[str]:
-    """Run the (blocking) agent in a worker thread and relay its events as SSE."""
+EventQueue = asyncio.Queue  # of event dicts, then None when the worker is done
+
+
+def _start(conv: Conversation, question: str) -> tuple[Turn, EventQueue, asyncio.Future[None]]:
+    """Run the (blocking) agent in a worker thread; its events go to the returned queue.
+    Call with conv.lock held: the worker releases it when it finishes."""
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
     turn = Turn("assistant", "", model=conv.agent.model)
@@ -427,8 +433,16 @@ async def _run(conv: Conversation, question: str) -> AsyncIterator[str]:
             conv.lock.release()
             emit(None)
 
+    try:
+        return turn, queue, loop.run_in_executor(None, work)
+    except BaseException:  # the worker didn't start, so it can't release the lock
+        conv.lock.release()
+        raise
+
+
+async def _relay(conv: Conversation, turn: Turn, queue: EventQueue, worker: asyncio.Future[None]) -> AsyncIterator[str]:
+    """Relay the worker's events as SSE. If the client goes away, the worker carries on and saves the answer."""
     yield _sse({"type": "conversation", **conv.summary(), "turn_id": turn.id})
-    worker = loop.run_in_executor(None, work)
     while (event := await queue.get()) is not None:
         yield _sse(event)
     await worker

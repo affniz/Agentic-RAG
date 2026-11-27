@@ -269,3 +269,24 @@ def test_retry_count_is_read_from_the_sdk_request_header():
 
     stream = NS(response=NS(request=NS(headers={"x-stainless-retry-count": "2"})))
     assert _retries(stream) == 2 and _retries(NS()) is None
+
+
+def test_find_citations_handles_hash_in_names_and_grouped_brackets():
+    from rag.agent import find_citations
+
+    assert find_citations("A [Q3 #2 plan.md#4] and [a.md#1, b.md#12; c d.md#0].") == [
+        ("Q3 #2 plan.md", 4), ("a.md", 1), ("b.md", 12), ("c d.md", 0)]
+    assert find_citations("[a.md#1](http://x) [link] [#3] [no number#] text#2]") == [("a.md", 1)]
+
+
+def test_citations_of_a_document_with_hash_in_its_name_resolve(kb):
+    docs = kb.index_dir.parent / "docs"
+    (docs / "Q3 #2 plan.md").write_text("# Plan\nShip the search page in Q3.")
+    kb.ingest(docs)
+    client = FakeClient([
+        message(stop_reason="tool_use", content=[tool("t1", "search_knowledge_base", query="ship", k=1, source="Q3 #2 plan.md")]),
+        message(stop_reason="end_turn", content=[text("In Q3 [Q3 #2 plan.md#0, vacation.md#9].")]),
+    ])
+    cites = RagAgent(kb, client=client).ask("q").citations
+    assert [(c["source"], c["index"], c["found"], c["shown"]) for c in cites] == [
+        ("Q3 #2 plan.md", 0, True, True), ("vacation.md", 9, False, False)]

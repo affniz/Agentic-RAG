@@ -231,19 +231,38 @@ export function Steps({ steps, timings = [], streaming }: { steps: Step[]; timin
 
 // ---------------------------------------------------------------- answer + citations
 
-const CITE = /\[([^[\]#\n]+)#(\d+)\]/g;
+// [source#n], or several in one bracket: [a.md#1, b.md#2]. A source name may contain "#", so the chunk
+// number is the last "#<digits>" of each part. Same rules as find_citations() in rag/agent.py.
+const CITE = /\[([^[\]\n]*#\d+)\]/g;
+const CITE_PART = /\s*(.+?)#(\d+)\s*(?:[,;]|$)/g;
 
 export type CiteRef = { source: string; index: number };
+
+const citeParts = (inner: string): CiteRef[] =>
+  [...inner.matchAll(CITE_PART)].map((m) => ({ source: m[1].trim(), index: Number(m[2]) }));
 
 /** Unique citations in order of first appearance - matches the numbering shown in the text. */
 export function citationOrder(text: string): CiteRef[] {
   const out: CiteRef[] = [];
   for (const m of text.matchAll(CITE)) {
-    const ref = { source: m[1], index: Number(m[2]) };
-    if (!out.some((r) => r.source === ref.source && r.index === ref.index)) out.push(ref);
+    for (const ref of citeParts(m[1])) {
+      if (!out.some((r) => r.source === ref.source && r.index === ref.index)) out.push(ref);
+    }
   }
   return out;
 }
+
+// Parentheses too, which encodeURIComponent keeps: "Policy (2025).md" would otherwise end the link early.
+const citeTarget = (s: string) => encodeURIComponent(s).replace(/\(/g, "%28").replace(/\)/g, "%29");
+
+/** Each citation as a `cite:` link, which Answer renders as a numbered button. */
+const linkCitations = (text: string) =>
+  text.replace(CITE, (whole, inner: string) => {
+    const refs = citeParts(inner);
+    return refs.length
+      ? refs.map((r) => `[${r.source}#${r.index}](cite:${citeTarget(r.source)}:${r.index})`).join("")
+      : whole;
+  });
 
 export function Answer({ turn, onCite, onFeedback }: {
   turn: Turn;
@@ -251,10 +270,7 @@ export function Answer({ turn, onCite, onFeedback }: {
   onFeedback?: (rating: Feedback["rating"] | null, comment?: string) => Promise<void>;
 }) {
   const order = useMemo(() => citationOrder(turn.text), [turn.text]);
-  const md = useMemo(
-    () => turn.text.replace(CITE, (_, s: string, i: string) => `[${s}#${i}](cite:${encodeURIComponent(s)}:${i})`),
-    [turn.text],
-  );
+  const md = useMemo(() => linkCitations(turn.text), [turn.text]);
   const found = (c: CiteRef): Citation | undefined =>
     turn.citations.find((x) => x.source === c.source && x.index === c.index);
 
