@@ -42,6 +42,26 @@ chunks=$(curl -sf "$URL/api/health" | json 'd["chunks"]')
 
 echo "OK: healthy, UI served, ingested and searched, index kept across restart ($chunks chunks)"
 
+# ---- documents on the data volume: an upload survives replacing the container
+VOLUME="rag-smoke-data-$$"
+trap 'cleanup; docker volume rm -f "$VOLUME" >/dev/null 2>&1 || true' EXIT
+run_with_volume() {
+  docker rm -f "$NAME" >/dev/null 2>&1 || true
+  docker run -d --name "$NAME" -p "127.0.0.1:$PORT:8000" -e RAG_FAKE_LLM=1 -e RAG_RERANK=0 -e HF_HUB_OFFLINE=1 \
+    -v "$VOLUME:/data" "$IMAGE" >/dev/null
+  wait_healthy
+}
+doc_listed() { curl -sf "$URL/api/documents" | json "any(r['name'] == '$1' for r in d['documents'])"; }
+run_with_volume
+[ "$(doc_listed acme_vacation_policy.md)" = True ] || fail "sample documents not copied to the data volume"
+printf '# Smoke\n\nUploaded in the smoke test.\n' > "$JAR.md"
+curl -sf -F "files=@$JAR.md;filename=smoke-upload.md" "$URL/api/documents" >/dev/null || fail "upload failed"
+rm -f "$JAR.md"
+run_with_volume
+[ "$(doc_listed smoke-upload.md)" = True ] || fail "uploaded document lost when the container was replaced"
+
+echo "OK: documents kept in the data volume across a new container"
+
 # ---- login (RAG_PASSWORD): a fresh container with a password
 docker rm -f "$NAME" >/dev/null
 PASSWORD="smoke test passphrase"

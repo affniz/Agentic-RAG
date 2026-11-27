@@ -176,7 +176,7 @@ class Conversation:
         cost = sum(t.cost_usd or 0 for t in self.turns)
         return {"id": self.id, "title": self.title, "created_at": self.created_at,
                 "updated_at": self.updated_at, "turns": len(self.turns), "cost_usd": cost,
-                "model": self.agent.model}
+                "model": self.agent.model, "answering": self.lock.locked()}
 
 
 conversations: dict[str, Conversation] = {}
@@ -422,6 +422,9 @@ def _start(conv: Conversation, question: str) -> tuple[Turn, EventQueue, asyncio
             turn.usage, turn.cost_usd = asdict(ans.usage), ans.cost_usd
         except Exception as e:  # surface API errors to the UI instead of dropping the stream
             turn.text, turn.stop = f"Error: {type(e).__name__}: {e}", "error"
+            for step in turn.steps:  # tool calls the failure cut short never finished
+                if step["status"] == "running":
+                    step["status"] = "error"
             emit({"type": "error", "message": f"{type(e).__name__}: {e}"})
             # Roll the API history back to before this question so the next request is valid.
             del conv.agent.messages[history_len:]
@@ -460,6 +463,8 @@ if DIST.exists():
 
     @app.get("/{path:path}", include_in_schema=False)
     def spa(path: str) -> FileResponse:
+        if path == "api" or path.startswith("api/"):  # an API route that doesn't exist, not a page
+            raise HTTPException(404, "not found")
         file = (DIST / path).resolve()
         if path and file.is_file() and file.is_relative_to(DIST.resolve()):
             return FileResponse(file)

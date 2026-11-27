@@ -76,6 +76,7 @@ export const api = {
   driveFolders: (p: { parent?: string; q?: string }) =>
     fetch(`/api/gdrive/folders?${new URLSearchParams({ parent: p.parent ?? "root", q: p.q ?? "" })}`).then(json<DriveFolders>),
   setDriveFolder: (folder: string) => fetch("/api/gdrive/folder", send("PUT", { folder })).then(json<DriveStatus>),
+  unselectDriveFolder: () => fetch("/api/gdrive/folder", { method: "DELETE" }).then(json<DriveStatus>),
   disconnectDrive: () => fetch("/api/gdrive/account", { method: "DELETE" }).then(json<DriveStatus>),
   dismissDriveError: () => fetch("/api/gdrive/error", { method: "DELETE" }).then(json<DriveStatus>),
   search: (p: { q: string; k: number; mode: string; rerank: boolean }) =>

@@ -86,6 +86,13 @@ class FakeDrive:
         return Resp(200, f["data"])
 
 
+@pytest.fixture(autouse=True)
+def no_backoff_sleep(monkeypatch):
+    waits = []
+    monkeypatch.setattr(gdrive, "_sleep", waits.append)
+    return waits
+
+
 def listing(dest):
     return sorted(str(p.relative_to(dest)) for p in dest.rglob("*") if p.is_file() and p.name != gdrive.STATE_FILE)
 
@@ -357,7 +364,7 @@ def test_connect_drive_from_the_ui(oauth, drive):
     assert r.status_code == 400 and "404" in r.json()["detail"]
     r = c.put("/api/gdrive/folder", json={"folder": f"https://drive.google.com/drive/folders/{ROOT}?usp=sharing"})
     assert r.json()["folder"] == ROOT and r.json()["folder_name"] == "Policies"
-    assert sessions[-1] == (CLIENT_ID, SECRET, REFRESH, gdrive_connect.TOKEN_URL)
+    assert sessions[-1][:4] == (CLIENT_ID, SECRET, REFRESH, gdrive_connect.TOKEN_URL) and callable(sessions[-1][4])
 
     # Sync it, through the same job as before.
     assert c.get("/api/documents").json()["gdrive"]["folder"] == ROOT
@@ -594,3 +601,136 @@ def test_files_of_an_interrupted_sync_stay_ours(drive, tmp_path, monkeypatch):
     del drive.files["new1"]
     gdrive.sync_folder(drive, ROOT, dest)
     assert "New.md" not in listing(dest) and (dest / "Vacation Policy.md").read_text() == "# v2"
+
+
+
+# ---------------------------------------------------------------- review fixes
+
+
+class Flaky:
+    """A session that answers with `answers` (status codes, or an exception) before passing calls to `inner`."""
+
+    def __init__(self, inner, answers, body=None, headers=None):
+        self.inner, self.answers, self.body, self.headers, self.calls = inner, list(answers), body, headers, 0
+
+    def get(self, url, params=None, timeout=None):
+        self.calls += 1
+        if self.answers:
+            a = self.answers.pop(0)
+            if isinstance(a, Exception):
+                raise a
+            r = Resp(a, self.body or {"error": {"message": "try later"}})
+            r.headers = self.headers or {}
+            return r
+        return self.inner.get(url, params=params, timeout=timeout)
+
+
+def test_transient_drive_errors_are_retried(drive, tmp_path, no_backoff_sleep):
+    import requests
+
+    dest = tmp_path / "gdrive"
+    session = Flaky(drive, [429, 503, requests.ConnectionError("reset")], headers={"Retry-After": "3"})
+    r = gdrive.sync_folder(session, ROOT, dest)
+    assert len(r.downloaded) == 5 and r.failed == {}
+    assert no_backoff_sleep[:2] == [3.0, 3.0] and len(no_backoff_sleep) == 3
+
+    rate_limited = {"error": {"message": "slow down", "errors": [{"reason": "userRateLimitExceeded"}]}}
+    session = Flaky(drive, [403], body=rate_limited)
+    assert gdrive.folder_info(session, ROOT)["name"] == "Policies" and session.calls == 2
+
+    forbidden = {"error": {"message": "no access", "errors": [{"reason": "insufficientFilePermissions"}]}}
+    session = Flaky(drive, [403], body=forbidden)  # a real 403 isn't retried
+    with pytest.raises(gdrive.DriveError, match="403"):
+        gdrive.folder_info(session, ROOT)
+    assert session.calls == 1
+
+    session = Flaky(drive, [500] * gdrive.MAX_TRIES)
+    with pytest.raises(gdrive.DriveError, match="500"):
+        gdrive.folder_info(session, ROOT)
+    assert session.calls == gdrive.MAX_TRIES
+
+
+def test_incomplete_listing_changes_nothing(drive, tmp_path):
+    dest = tmp_path / "gdrive"
+    gdrive.sync_folder(drive, ROOT, dest)
+    before = listing(dest)
+
+    real_get = drive.get
+
+    def incomplete(url, params=None, timeout=None):
+        resp = real_get(url, params, timeout)
+        if url == gdrive.API and params and params.get("q", "").startswith("'sub1'"):
+            body = resp.json()
+            body["incompleteSearch"] = True
+            body["files"] = []  # Drive left the folder's files out
+            return Resp(200, body)
+        return resp
+
+    drive.get = incomplete
+    with pytest.raises(gdrive.DriveError, match="incomplete listing"):
+        gdrive.sync_folder(drive, ROOT, dest)
+    assert listing(dest) == before
+
+
+def test_long_names_fit_the_file_system(tmp_path):
+    d = FakeDrive()
+    d.add("jp1", "社内規程" * 40, DOC, b"# x\n\nbody")
+    d.add("en1", "a" * 300 + ".md", "text/markdown", b"long")
+    dest = tmp_path / "gdrive"
+    r = gdrive.sync_folder(d, ROOT, dest)
+    assert r.failed == {} and len(r.downloaded) == 2
+    for name in r.downloaded:
+        assert len(name.encode()) <= gdrive.MAX_NAME_BYTES + len(".md") and (dest / name).is_file()
+
+
+def test_expired_sign_in_is_shown_and_forgotten(oauth, drive):
+    from google.auth.exceptions import RefreshError
+
+    c, google, sessions, saved = oauth
+    c.put("/api/gdrive/client", json={"client_id": CLIENT_ID, "client_secret": SECRET})
+    q = _start(c, google)
+    _callback(c, state=q["state"], code="good-code")
+    c.put("/api/gdrive/folder", json={"folder": ROOT})
+    on_auth_error = sessions[0][4]
+
+    class Dead:
+        def get(self, *a, **k):
+            raise RefreshError("invalid_grant: Token has been expired or revoked.", {"error": "invalid_grant"})
+
+    with pytest.raises(gdrive.DriveAuthError):
+        gdrive._OAuthSession(Dead(), on_auth_error).get(gdrive.API)
+    st = c.get("/api/gdrive").json()
+    assert st["account"] is None and "expired or was revoked" in st["error"]
+    assert st["folder"] == ROOT  # kept: connecting again needs no new folder choice
+    assert "refresh_token" not in json.loads(saved.read_text())
+
+    # A retryable refresh failure (Google's own hiccup) is just an error for this attempt.
+    class Hiccup:
+        def get(self, *a, **k):
+            raise RefreshError("temporarily unavailable", retryable=True)
+
+    with pytest.raises(gdrive.DriveError, match="try again") as e:
+        gdrive._OAuthSession(Hiccup(), lambda err: pytest.fail("not an auth failure")).get(gdrive.API)
+    assert not isinstance(e.value, gdrive.DriveAuthError)
+
+
+def test_unselect_folder_and_synced_files_are_protected(oauth, drive):
+    c, google, sessions, saved = oauth
+    c.put("/api/gdrive/client", json={"client_id": CLIENT_ID, "client_secret": SECRET})
+    q = _start(c, google)
+    _callback(c, state=q["state"], code="good-code")
+    c.put("/api/gdrive/folder", json={"folder": ROOT})
+    c.post("/api/gdrive/sync")
+    assert _wait(c)["state"] == "done"
+
+    docs = {r["name"]: r for r in c.get("/api/documents").json()["documents"]}
+    assert docs["gdrive/notes.txt"]["gdrive"] and not any(r["gdrive"] for n, r in docs.items() if not n.startswith("gdrive/"))
+    r = c.delete("/api/documents/gdrive/notes.txt")
+    assert r.status_code == 409 and "Google Drive" in r.json()["detail"]
+
+    st = c.delete("/api/gdrive/folder").json()
+    assert st["folder"] is None and st["folder_name"] is None and st["account"] == "pat@example.com"
+    assert c.post("/api/gdrive/sync").status_code == 404  # nothing to sync
+    docs = {r["name"]: r for r in c.get("/api/documents").json()["documents"]}
+    assert "gdrive/notes.txt" in docs and not docs["gdrive/notes.txt"]["gdrive"]  # kept, now an ordinary file
+    assert c.delete("/api/documents/gdrive/notes.txt").status_code == 200

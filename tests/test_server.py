@@ -413,3 +413,46 @@ def test_password_allows_any_host_but_not_cross_site(locked):
         r = locked.post("/api/chat", json={"message": "hi"}, headers={"Host": "rag.lan", **headers})
         assert r.status_code == 403, headers
         assert login(locked, Host="rag.lan", **headers).status_code == 403
+
+
+
+def test_conversation_reports_while_it_is_answering(client):
+    # The UI reloads a chat it left mid-answer until this turns false.
+    import asyncio
+
+    import server.app as app_module
+
+    app_module.client.delay = 0.02  # a slow model, so the answer is still running when we look
+
+    async def ask_and_look():
+        res = await app_module.chat(app_module.ChatRequest(message="how many days carry over?"))
+        await res.body_iterator.aclose()
+        conv = next(iter(app_module.conversations.values()))
+        during = client.get(f"/api/conversations/{conv.id}").json()
+        listed = client.get("/api/conversations").json()[0]
+        for _ in range(500):
+            if not conv.lock.locked():
+                break
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.05)
+        return conv, during, listed
+
+    conv, during, listed = asyncio.run(ask_and_look())
+    assert during["answering"] and listed["answering"] and len(during["messages"]) == 1
+    after = client.get(f"/api/conversations/{conv.id}").json()
+    assert not after["answering"] and [m["role"] for m in after["messages"]] == ["user", "assistant"]
+
+
+def test_unknown_api_route_is_a_404_not_the_app(client):
+    r = client.get("/api/no-such-thing")
+    assert r.status_code == 404 and "json" in r.headers["content-type"]
+
+
+def test_an_unreadable_eval_set_is_listed_with_its_error(client, tmp_path):
+    broken = tmp_path / "evals" / "broken"
+    broken.mkdir()
+    (broken / "questions.jsonl").write_text("{not json\n")
+    sets = {s["name"]: s for s in client.get("/api/evals/sets").json()}
+    assert "mini" in sets and "can't read this set" in sets["broken"]["error"]
+    r = client.post("/api/evals/run", json={"kind": "retrieval", "set": "broken"})
+    assert r.status_code == 400 and "broken" in r.json()["detail"]

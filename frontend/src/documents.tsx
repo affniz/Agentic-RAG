@@ -184,7 +184,7 @@ export function DocumentsPage({ health, onIndexChanged }: { health: Health | nul
 
           {tab === "files" ? (
             <div className="mt-4 space-y-4">
-              <DrivePanel running={running} lastJob={ingest.finished_at} onSync={syncDrive} />
+              <DrivePanel running={running} lastJob={ingest.finished_at} onSync={syncDrive} onChanged={refresh} />
               <DropZone onFiles={(files) => upload(files)} busy={uploading} />
               {rejected.length > 0 && (
                 <Alert tone="error">
@@ -330,7 +330,10 @@ const input = "w-full rounded-lg border border-zinc-200 bg-white px-3 py-1.5 tex
 const link = "font-medium text-indigo-700 underline decoration-indigo-300 underline-offset-2 hover:text-indigo-900 dark:text-indigo-400 dark:decoration-indigo-700";
 
 /** Connect a Google Drive folder: one-time OAuth client setup, "Connect Google Drive", choose a folder, sync. */
-function DrivePanel({ running, lastJob, onSync }: { running: boolean; lastJob?: number; onSync: () => void }) {
+/** onChanged: the connection changed (folder unselected, disconnected, ...), which changes which files are Drive's. */
+function DrivePanel({ running, lastJob, onSync, onChanged }: {
+  running: boolean; lastJob?: number; onSync: () => void; onChanged: () => void;
+}) {
   const [st, setSt] = useState<DriveStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -346,6 +349,7 @@ function DrivePanel({ running, lastJob, onSync }: { running: boolean; lastJob?: 
     try {
       const next = await fn();
       if (next) setSt(next);
+      onChanged();
       return true;
     } catch (e) {
       setError((e as Error).message);
@@ -379,7 +383,8 @@ function DrivePanel({ running, lastJob, onSync }: { running: boolean; lastJob?: 
           <p className="mt-0.5 text-sm text-zinc-500">
             {st.mode === "env" ? <>Folder set by the server · synced into <code>{st.dir}/</code> · {synced}</>
               : st.account ? <>Connected as <span className="font-medium text-zinc-700 dark:text-zinc-300">{st.account}</span>
-                {st.folder && <> · Folder <span className="font-medium text-zinc-700 dark:text-zinc-300">{st.folder_name ?? st.folder}</span> · {synced}</>}</>
+                {st.folder ? <> · Folder <span className="font-medium text-zinc-700 dark:text-zinc-300">{st.folder_name ?? st.folder}</span> · {synced}</>
+                  : <> · No folder selected</>}</>
               : "Sync Google Docs, Slides, PDFs and text files from a Drive folder. Read-only."}
           </p>
         </div>
@@ -390,8 +395,17 @@ function DrivePanel({ running, lastJob, onSync }: { running: boolean; lastJob?: 
               {running ? Icon.spinner() : Icon.refresh()} Sync now
             </button>
           )}
-          {st.mode === "oauth" && st.account && st.folder && !editFolder && (
-            <button className={btnSecondary} onClick={() => setEditFolder(true)} disabled={busy}>Change folder</button>
+          {st.mode === "oauth" && st.account && !editFolder && (
+            <button className={st.folder ? btnSecondary : btnPrimary} onClick={() => setEditFolder(true)} disabled={busy}>
+              {st.folder ? "Change folder" : "Choose folder"}
+            </button>
+          )}
+          {st.mode === "oauth" && st.account && st.folder && (
+            <button className={btnSecondary} disabled={busy || running}
+              onClick={() => window.confirm(`Stop syncing “${st.folder_name ?? st.folder}”? Files already synced stay in your documents (and can then be deleted there); choosing another folder later replaces them.`)
+                && act(api.unselectDriveFolder).then((ok) => ok && setEditFolder(false))}>
+              Unselect folder
+            </button>
           )}
           {st.mode === "oauth" && st.account && (
             <button className={btnSecondary} disabled={busy || running}
@@ -432,13 +446,17 @@ function DrivePanel({ running, lastJob, onSync }: { running: boolean; lastJob?: 
           onSave={(id, secret) => act(() => api.setDriveClient(id, secret)).then((ok) => ok && setSetup(false))} />
       )}
 
-      {st.mode === "oauth" && st.account && (!st.folder || editFolder) && (
-        <FolderPicker current={st.folder} busy={busy || running} onCancel={st.folder ? () => setEditFolder(false) : undefined}
-          onSave={(folder) => act(() => api.setDriveFolder(folder)).then((ok) => {
-            if (!ok) return;
-            setEditFolder(false);
-            onSync(); // picking a folder means "sync this": start right away
-          })} />
+      {st.mode === "oauth" && st.account && editFolder && (
+        <FolderPicker current={st.folder} busy={busy || running} onCancel={() => setEditFolder(false)}
+          onSave={(folder) => {
+            const switching = st.folder && folder !== st.folder && st.last_sync;
+            if (switching && !window.confirm(`Sync this folder instead of “${st.folder_name ?? st.folder}”? Files synced from that folder will be removed from your documents.`)) return;
+            act(() => api.setDriveFolder(folder)).then((ok) => {
+              if (!ok) return;
+              setEditFolder(false);
+              onSync(); // picking a folder means "sync this": start right away
+            });
+          }} />
       )}
     </section>
   );
@@ -457,7 +475,7 @@ function ClientSetup({ status, busy, onSave, onCancel }: {
       <p className="font-medium">One-time setup: create a Google OAuth client for this app</p>
       <ol className="list-decimal space-y-1.5 pl-5 text-zinc-600 dark:text-zinc-400">
         <li className={step}>In Google Cloud, <a className={link} href="https://console.cloud.google.com/apis/library/drive.googleapis.com" target="_blank" rel="noreferrer">enable the Google Drive API</a> for a project.</li>
-        <li className={step}><a className={link} href="https://console.cloud.google.com/auth/overview" target="_blank" rel="noreferrer">Set up Google Auth Platform</a>: audience <b>External</b>, and add the Google accounts that will connect as <b>test users</b>.</li>
+        <li className={step}><a className={link} href="https://console.cloud.google.com/auth/overview" target="_blank" rel="noreferrer">Set up Google Auth Platform</a>: audience <b>External</b>, and add the Google accounts that will connect as <b>test users</b>. While the app is in <b>Testing</b>, Google ends the sign-in after 7 days; <b>Publish app</b> (under Audience) to stay connected.</li>
         <li className={step}>
           <a className={link} href="https://console.cloud.google.com/auth/clients/create" target="_blank" rel="noreferrer">Create a client</a> of type <b>Web application</b> with this authorized redirect URI:
           <div className="mt-1.5 flex items-center gap-2">
@@ -661,6 +679,9 @@ function FileTable({ docs, onView, onDelete, onTranscribe, busy, compact = false
                     className="flex w-full min-w-0 items-center gap-2 text-left enabled:hover:text-indigo-600 disabled:cursor-default">
                     <span className="shrink-0 text-zinc-400">{Icon.doc()}</span>
                     <span className="truncate font-medium">{d.name}</span>
+                    {d.gdrive && (
+                      <span className="shrink-0 text-zinc-400" title="Synced from Google Drive">{Icon.cloud("h-3.5 w-3.5")}</span>
+                    )}
                   </button>
                   {d.error && <p className="ml-6 mt-0.5 text-xs text-red-700 dark:text-red-300">{d.error}</p>}
                 </td>
@@ -681,7 +702,12 @@ function FileTable({ docs, onView, onDelete, onTranscribe, busy, compact = false
                       Transcribe
                     </button>
                   )}
-                  {d.status !== "deleted" && (confirming === d.name ? (
+                  {d.gdrive ? (
+                    <span className="inline-block rounded p-1.5 text-zinc-300 dark:text-zinc-600"
+                      title="Synced from Google Drive: delete it in Drive, or unselect the folder first. Deleting it here would only bring it back on the next sync.">
+                      {Icon.trash()}
+                    </span>
+                  ) : d.status !== "deleted" && (confirming === d.name ? (
                     <button onClick={() => { setConfirming(null); onDelete(d.name); }} disabled={busy}
                       className="rounded-md bg-red-600 px-2 py-1 text-xs font-medium text-white hover:bg-red-700 disabled:opacity-50">
                       Confirm delete

@@ -98,6 +98,10 @@ panel.
    as *test users*), and create an OAuth client of type *Web application* with the redirect URI the panel shows
    (`http://localhost:8000/api/gdrive/oauth/callback` for a local server). Paste the client ID and secret. They can
    instead be set with `RAG_GDRIVE_CLIENT_ID` / `RAG_GDRIVE_CLIENT_SECRET`, which then can't be changed in the UI.
+   While the app's publishing status is *Testing*, Google ends the sign-in after 7 days and you have to connect
+   again. To avoid that, publish it (Google Auth Platform > Audience > *Publish app*). It doesn't need Google's
+   verification for your own use; sign-in just keeps showing the "unverified app" warning. When a sign-in has
+   expired or was revoked, the panel says so and offers **Connect Google Drive** again; the chosen folder is kept.
 2. **Connect Google Drive** opens Google's sign-in (read-only Drive access). Google warns that the app isn't
    verified, since it's your own client: choose *Continue*, and tick the Google Drive permission.
 3. **Choose the folder** in the panel's folder browser: *My Drive*, *Shared with me* or *Shared drives*, open
@@ -183,10 +187,14 @@ docker run -p 127.0.0.1:8000:8000 -e ANTHROPIC_API_KEY -v rag-data:/data agentic
 - **Password login:** `docker run -p 8000:8000 -e RAG_PASSWORD='a long random passphrase' -e ANTHROPIC_API_KEY -v rag-data:/data agentic-rag`
   can be published on your network: everything but the sign-in screen needs the password (see *Login* above).
 - **Demo mode** (no API key, real search, fake model): `docker run -p 127.0.0.1:8000:8000 -e RAG_FAKE_LLM=1 agentic-rag`.
-- **Your documents:** mount them over the samples with `-v /path/to/docs:/app/docs`, then click **Re-index** on the Documents screen.
-- **Google Drive:** `-e RAG_GDRIVE_FOLDER=<folder id or URL> -e RAG_GDRIVE_CREDENTIALS=/secrets/key.json -v /path/to/key.json:/secrets/key.json:ro`,
-  then click **Sync Google Drive** (see *Google Drive* above). Mount a `docs` volume too if the synced files should survive a container rebuild.
-- **What persists:** the index, settings, feedback and chat conversations live in the `/data` volume. Eval results are written inside the container.
+- **Your documents:** files you upload, and files synced from Google Drive, are kept in the `/data` volume (`/data/docs`,
+  which starts with the sample documents). To use a folder of your own instead, mount it with `-v /path/to/docs:/app/docs`,
+  then click **Re-index** on the Documents screen.
+- **Google Drive:** connect it on the Documents screen (see *Google Drive* above), or set the folder with
+  `-e RAG_GDRIVE_FOLDER=<folder id or URL> -e RAG_GDRIVE_CREDENTIALS=/secrets/key.json -v /path/to/key.json:/secrets/key.json:ro`
+  and click **Sync now**.
+- **What persists:** the documents (unless you mount your own folder), the index, settings, feedback, chat conversations
+  and the Google Drive connection live in the `/data` volume. Eval results are written inside the container.
 - **Build without the reranker** (e.g. where Hugging Face is unreachable): `--build-arg BAKE_RERANKER=0`; it is then downloaded on first use, and search works without it if that fails.
 - **Other hostnames:** without a password the server only answers requests addressed to localhost (see *Local only* above). To open it under another name, e.g. on a home server, set `RAG_PASSWORD` (any hostname then works), or add `-e RAG_ALLOWED_HOSTS=myhost` - without a password anyone who can reach the port can use your API key.
 - `scripts/docker_smoke_test.sh [image]` checks a built image end to end in demo mode, then again with `RAG_PASSWORD` set (health check, API locked until login).

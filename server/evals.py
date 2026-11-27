@@ -117,6 +117,12 @@ def make_router(evals_dir: Path, index_root: Path, client_factory: Callable[[], 
             raise HTTPException(404, f"eval set {name!r} not found")
         return path
 
+    def open_set(name: str) -> Any:
+        try:
+            return load_set(set_dir(name))
+        except (OSError, ValueError, AttributeError) as e:
+            raise HTTPException(400, f"can't read eval set {name!r}: {type(e).__name__}: {e}")
+
     def runs() -> list[dict[str, Any]]:
         if not results_dir.is_dir():
             return []
@@ -127,13 +133,17 @@ def make_router(evals_dir: Path, index_root: Path, client_factory: Callable[[], 
     def sets() -> list[dict[str, Any]]:
         out = []
         for path in sorted(evals_dir.glob("*/questions.jsonl")):
-            es = load_set(path.parent)
-            cats: dict[str, int] = {}
-            for q in es.questions:
-                cats[q.get("category", "uncategorized")] = cats.get(q.get("category", "uncategorized"), 0) + 1
-            cfg = json.loads((path.parent / "config.json").read_text()) if (path.parent / "config.json").exists() else {}
-            out.append({"name": path.parent.name, "questions": len(es.questions), "categories": cats,
-                        "description": cfg.get("description", ""), "docs_found": es.docs_dir.is_dir()})
+            try:
+                es = load_set(path.parent)
+                cats: dict[str, int] = {}
+                for q in es.questions:
+                    cats[q.get("category", "uncategorized")] = cats.get(q.get("category", "uncategorized"), 0) + 1
+                cfg = json.loads((path.parent / "config.json").read_text()) if (path.parent / "config.json").exists() else {}
+                out.append({"name": path.parent.name, "questions": len(es.questions), "categories": cats,
+                            "description": cfg.get("description", ""), "docs_found": es.docs_dir.is_dir()})
+            except (OSError, ValueError, AttributeError) as e:  # bad JSON, a question that isn't an object, ...
+                out.append({"name": path.parent.name, "questions": 0, "categories": {}, "docs_found": False,
+                            "description": "", "error": f"can't read this set: {type(e).__name__}: {e}"})
         return out
 
     @router.get("/runs")
@@ -150,7 +160,7 @@ def make_router(evals_dir: Path, index_root: Path, client_factory: Callable[[], 
 
     @router.post("/estimate")
     def estimate(req: RunRequest) -> dict[str, Any]:
-        es = load_set(set_dir(req.set))
+        es = open_set(req.set)
         s = settings()
         model = req.model or s.model
         n = min(len(es.questions), req.limit or len(es.questions))
@@ -194,7 +204,7 @@ def make_router(evals_dir: Path, index_root: Path, client_factory: Callable[[], 
 
     @router.post("/run")
     def run(req: RunRequest) -> dict[str, Any]:
-        es = load_set(set_dir(req.set))
+        es = open_set(req.set)
         if not es.docs_dir.is_dir():
             raise HTTPException(400, f"documents folder for {req.set} not found: {es.docs_dir}")
         s = settings()
