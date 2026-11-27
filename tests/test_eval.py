@@ -217,3 +217,12 @@ def test_unseen_citations_are_counted(kb):
            "tool_calls": 0, "api_calls": 1, "seconds": 1.0, "cost_usd": 0.0, "judge_cost_usd": 0.0}
     s = summarize([{**row, "unseen_citations": ["people.md#0"]}, {**row, "unseen_citations": []}])
     assert s["cited_unseen"] == 0.5
+
+
+
+def test_feedback_export_strips_every_citation_form():
+    from server.feedback import to_eval_questions
+
+    rec = {"turn_id": "t1", "rating": "up", "question": "q", "created_at": 1, "citations": [],
+           "answer": "Ship in Q3 [Q3 #2 plan.md#0] and test [a.md#1, b.md#2]."}
+    assert to_eval_questions([rec])[0][0]["reference"] == "Ship in Q3 and test."

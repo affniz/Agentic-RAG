@@ -7,8 +7,9 @@ are downloaded as they are. Other types (Sheets, images, Office files, ...) are 
 
     report = sync_folder(drive_session(), "1AbC...", Path("docs/gdrive"))
 
-Only files this connector wrote are ever deleted (tracked in `<dest>/.gdrive.json`), so pointing it
-at a folder that also holds your own files is safe. A file is re-downloaded when its Drive
+Only files this connector wrote are ever deleted or overwritten (tracked in `<dest>/.gdrive.json`), so
+pointing it at a folder that also holds your own files is safe: a Drive file whose name one of yours
+already has is saved as "<name> [<id prefix>].<ext>" instead. A file is re-downloaded when its Drive
 modifiedTime changes, or when the local copy is missing.
 
 Authentication (read-only scope): a service account key or an authorized-user file passed as
@@ -318,9 +319,17 @@ def sync_folder(session: Session, folder: str, dest: str | Path,
     progress("listing", 0, 0)
     items = _walk(session, fid)  # before touching anything local
 
+    # Everything we wrote before, even for another folder id: files not in this folder are removed.
+    state = _load_state(dest)
+    old: dict[str, dict[str, Any]] = state.get("files", {})
+    # Paths a sync that didn't finish may have written (see below): ours too, though not in `old`.
+    claimed: list[str] = state.get("claimed", [])
+    own = {v["path"] for v in old.values()} | set(claimed)
+
     # Decide each item's local path. Drive allows duplicate names; later ones (by id) get a suffix.
+    # Files in `dest` that this connector didn't write are never overwritten: their names are taken.
     wanted: dict[str, tuple[str, str, dict[str, Any]]] = {}  # drive id -> (local path, Drive path, file)
-    taken: set[str] = set()
+    taken: set[str] = {rel.lower() for rel in _local_files(dest) if rel not in own}
     for parents, f in sorted(items, key=lambda pf: ([_safe(p) for p in pf[0]], pf[1]["name"], pf[1]["id"])):
         drive_path = "/".join(parents + [f["name"]])
         ext = _extension(f)
@@ -338,8 +347,6 @@ def sync_folder(session: Session, folder: str, dest: str | Path,
         wanted[f["id"]] = (rel, drive_path, f)
 
     dest.mkdir(parents=True, exist_ok=True)
-    # Everything we wrote before, even for another folder id: files not in this folder are removed.
-    old: dict[str, dict[str, Any]] = _load_state(dest).get("files", {})
     files: dict[str, dict[str, Any]] = {}  # the new state: drive id -> {path, modified, name}
     wanted_paths = {rel for rel, _, _ in wanted.values()}
 
@@ -351,6 +358,12 @@ def sync_folder(session: Session, folder: str, dest: str | Path,
             report.unchanged += 1
         else:
             todo.append((i, rel, drive_path, f))
+
+    # Record the paths about to be written before writing them, so that if this sync is interrupted,
+    # the next one still knows those files are its own (to update or remove), not the user's.
+    if todo:
+        _write_state(dest, {**state, "folder": fid, "files": old,
+                            "claimed": sorted(set(claimed) | {rel for _, rel, _, _ in todo})})
 
     for n, (i, rel, drive_path, f) in enumerate(todo):
         progress("downloading", n, len(todo))
@@ -378,11 +391,25 @@ def sync_folder(session: Session, folder: str, dest: str | Path,
     for i, entry in old.items():
         if entry["path"] not in live_paths and _remove(dest, entry["path"]) and i not in files:
             report.removed.append(entry["path"])
+    for rel in claimed:  # written by an interrupted sync and not wanted any more
+        if rel not in live_paths:
+            _remove(dest, rel)
 
     report.finished_at = time.time()
-    state = {"folder": fid, "files": files, "report": asdict(report)}
-    _write_atomic(dest / STATE_FILE, json.dumps(state, indent=1).encode())
+    _write_state(dest, {"folder": fid, "files": files, "report": asdict(report)})
     return report
+
+
+def _write_state(dest: Path, state: dict[str, Any]) -> None:
+    _write_atomic(dest / STATE_FILE, json.dumps(state, indent=1).encode())
+
+
+def _local_files(dest: Path) -> list[str]:
+    """Paths (relative, with /) of the files in `dest`, leaving out our state and temporary files."""
+    if not dest.is_dir():
+        return []
+    return [p.relative_to(dest).as_posix() for p in dest.rglob("*")
+            if p.is_file() and not p.name.startswith(".")]
 
 
 def _remove(dest: Path, rel: str) -> bool:

@@ -19,7 +19,7 @@ from typing import Any, Callable, Literal
 import anthropic
 from pydantic import BaseModel
 
-from .agent import AGENT_INSTRUCTIONS_V1, CITATION_RE, Answer, RagAgent, SearchOptions, Usage
+from .agent import AGENT_INSTRUCTIONS_V1, Answer, RagAgent, SearchOptions, Usage, find_citations
 from .baseline import NaiveRag
 from .models import request_options
 from .store import KnowledgeBase
@@ -233,7 +233,8 @@ def answer_eval(
         except Exception as e:  # one failed question (rate limit, overload, ...) must not lose the run
             return _error_row(q, sysname, rep, ans, time.time() - start, e)
         sources = q.get("sources", [])
-        cited = all(re.search(rf"\[{re.escape(s)}#\d+\]", ans.text) for s in sources) if sources else None
+        cited_sources = {s for s, _ in find_citations(ans.text)}
+        cited = all(s in cited_sources for s in sources) if sources else None
         return {
             "id": q["id"],
             "category": q.get("category", "uncategorized"),
@@ -310,7 +311,7 @@ def _error_row(q: dict[str, Any], sysname: str, rep: int, ans: Answer | None, se
 
 def unseen_citations(ans: Answer) -> list[str]:
     """Citations of chunks the system never showed the model: guesses presented as evidence."""
-    return sorted({f"{s}#{i}" for s, i in CITATION_RE.findall(ans.text)} - set(ans.retrieved))
+    return sorted({f"{s}#{i}" for s, i in find_citations(ans.text)} - set(ans.retrieved))
 
 
 RANGED = ("correct", "partially_correct", "evidence_recall", "cited_expected_sources", "cited_unseen")

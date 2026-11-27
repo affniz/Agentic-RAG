@@ -63,6 +63,32 @@ def test_chat_stream_and_conversation_roundtrip(client):
     assert client.get(f"/api/conversations/{cid}").status_code == 404
 
 
+
+def test_client_that_leaves_before_reading_does_not_lock_the_conversation(client):
+    # The browser disconnects (or aborts) before the stream is read: the answer still runs and
+    # is saved, and the conversation takes the next question instead of answering 409 forever.
+    import asyncio
+
+    import server.app as app_module
+
+    async def ask_and_leave():
+        res = await app_module.chat(app_module.ChatRequest(message="how many days carry over?"))
+        await res.body_iterator.aclose()  # never read
+        conv = next(iter(app_module.conversations.values()))
+        for _ in range(500):
+            if not conv.lock.locked():
+                break
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.05)  # let the worker's last event reach the loop
+        return conv
+
+    conv = asyncio.run(ask_and_leave())
+    assert not conv.lock.locked()
+    assert [t.role for t in conv.turns] == ["user", "assistant"] and conv.turns[1].citations
+    evs = events(client.post("/api/chat", json={"message": "and when?", "conversation_id": conv.id}))
+    assert evs[-1]["type"] == "done"
+    assert len(client.get(f"/api/conversations/{conv.id}").json()["messages"]) == 4
+
 def test_chunk_endpoint_and_errors(client):
     r = client.get("/api/chunks/vacation.md/0").json()
     assert r["chunks"][0]["cited"] and r["chunks"][0]["section"] == "Vacation > Carry-over"

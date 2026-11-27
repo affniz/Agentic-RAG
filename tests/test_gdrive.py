@@ -542,3 +542,55 @@ def test_choose_folder_by_browsing(oauth, drive):
 def test_no_browsing_when_the_server_sets_the_folder(drive, tmp_path, monkeypatch):
     c = _client(tmp_path, monkeypatch, drive)
     assert c.get("/api/gdrive/folders").status_code == 409
+
+
+def test_files_not_from_drive_are_never_overwritten(drive, tmp_path):
+    dest = tmp_path / "gdrive"
+    dest.mkdir()
+    (dest / "notes.txt").write_text("my own notes")  # same name as Drive's notes.txt
+    r = gdrive.sync_folder(drive, ROOT, dest)
+    assert (dest / "notes.txt").read_text() == "my own notes"
+    assert (dest / "notes [txt1].txt").read_bytes() == b"plain notes"
+    assert "notes [txt1].txt" in r.downloaded
+
+    # Later syncs keep it that way, and removing it in Drive removes only the downloaded copy.
+    del drive.files["txt1"]
+    r = gdrive.sync_folder(drive, ROOT, dest)
+    assert r.removed == ["notes [txt1].txt"] and (dest / "notes.txt").read_text() == "my own notes"
+
+
+def test_files_of_an_interrupted_sync_stay_ours(drive, tmp_path, monkeypatch):
+    dest = tmp_path / "gdrive"
+    real_write = gdrive._write_atomic
+
+    def crash_after(n):
+        """Sync with the process dying after `n` downloaded files have been written."""
+        written = []
+
+        def write(path, data):
+            if path.name != gdrive.STATE_FILE:
+                if len(written) == n:
+                    raise KeyboardInterrupt
+                written.append(path.name)
+            real_write(path, data)
+
+        monkeypatch.setattr(gdrive, "_write_atomic", write)
+        with pytest.raises(KeyboardInterrupt):
+            gdrive.sync_folder(drive, ROOT, dest)
+        monkeypatch.setattr(gdrive, "_write_atomic", real_write)
+        return written
+
+    assert len(crash_after(2)) == 2
+
+    # The next sync updates those files in place (no "[id]" duplicates) ...
+    r = gdrive.sync_folder(drive, ROOT, dest)
+    assert listing(dest) == ["All hands.txt", "HR/Benefits.md", "Vacation Policy.md", "handbook.pdf", "notes.txt"]
+    assert "claimed" not in json.loads((dest / gdrive.STATE_FILE).read_text())
+
+    # ... and a file the interrupted sync wrote that is gone from Drive meanwhile is removed.
+    drive.files["doc1"].update(data=b"# v2", modifiedTime="2026-03-01T00:00:00Z")
+    drive.add("new1", "New.md", "text/markdown", b"new")
+    assert crash_after(1) == ["New.md"]
+    del drive.files["new1"]
+    gdrive.sync_folder(drive, ROOT, dest)
+    assert "New.md" not in listing(dest) and (dest / "Vacation Policy.md").read_text() == "# v2"

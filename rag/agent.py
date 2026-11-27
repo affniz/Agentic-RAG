@@ -35,10 +35,20 @@ CONTEXT_MANAGEMENT: dict[str, Any] = {
     }]
 }
 
-CITATION_RE = re.compile(r"\[([^\[\]#\n]+)#(\d+)\]")
+# Citations in an answer: [source#n], or several in one bracket, [a.md#1, b.md#2]. A source name may
+# itself contain "#" (e.g. "Q3 #2 plan.md"), so the chunk number is the last "#<digits>" of each part.
+# Use find_citations() to read them; CITATION_RE matches whole brackets.
+CITATION_RE = re.compile(r"\[([^\[\]\n]*#\d+)\]")
+_CITATION_PART = re.compile(r"\s*(.+?)#(\d+)\s*(?:[,;]|$)")
 # A chunk label at the start of a line of tool output (see Chunk.render), as opposed to a
 # citation-like string that happens to appear inside a chunk's text.
-LABEL_RE = re.compile(r"^\[([^\[\]#\n]+)#(\d+)\]", re.M)
+LABEL_RE = re.compile(r"^\[([^\[\]\n]+)#(\d+)\]", re.M)
+
+
+def find_citations(text: str) -> list[tuple[str, int]]:
+    """(source, chunk index) for every citation in `text`, in order (repeats included)."""
+    return [(p.group(1).strip(), int(p.group(2)))
+            for m in CITATION_RE.finditer(text) for p in _CITATION_PART.finditer(m.group(1))]
 
 # Rules for answering from retrieved text. Shared with the non-agentic baseline
 # (rag/baseline.py) so evals compare retrieval strategies, not prompts.
@@ -427,8 +437,8 @@ class RagAgent:
         """
         shown = self._shown_chunks()
         out, seen = [], set()
-        for source, idx in CITATION_RE.findall(text):
-            key = (source, int(idx))
+        for key in find_citations(text):
+            source = key[0]
             if key in seen:
                 continue
             seen.add(key)

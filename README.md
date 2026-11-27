@@ -66,8 +66,9 @@ Documents can come from a Google Drive folder (and its subfolders). The connecto
   and **PDFs, `.md` and `.txt`** files are downloaded as they are. Sheets, images, Office files and shortcuts
   are skipped and listed in the sync report. Files over 50 MB are skipped.
 - Deleting, trashing or moving a file out of the folder in Drive removes it locally on the next sync; a
-  rename replaces the old copy. Only files the connector downloaded are ever deleted (tracked in
-  `docs/gdrive/.gdrive.json`). A file that fails to download keeps its previous copy and is retried next time.
+  rename replaces the old copy. Only files the connector downloaded are ever deleted or overwritten (tracked in
+  `docs/gdrive/.gdrive.json`); a Drive file whose name is already used by one of your own files there is saved
+  as `<name> [<id prefix>].<ext>`. A file that fails to download keeps its previous copy and is retried next time.
 - Access is read-only (`drive.readonly` scope).
 
 **Credentials.** Either a service account (best for the server and Docker):

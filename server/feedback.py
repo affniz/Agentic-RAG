@@ -85,7 +85,7 @@ class FeedbackStore:
             self.file.write(data)
 
 
-CITATION = re.compile(r"\s*\[[^\[\]#\n]+#\d+\]")
+CITATION = re.compile(r"\s*\[[^\[\]\n]*#\d+\]")  # one or more citations in a bracket, see rag/agent.py
 
 
 def to_eval_questions(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
