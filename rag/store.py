@@ -288,16 +288,19 @@ class Reranker:
         self.model_name = model
         self._model = None
         self.available = True
+        self._lock = threading.Lock()  # parallel searches (agent tool calls, evals) load it once
 
     def _load(self) -> bool:
         if self._model is None and self.available:
-            try:
-                from fastembed.rerank.cross_encoder import TextCrossEncoder
+            with self._lock:
+                if self._model is None and self.available:
+                    try:
+                        from fastembed.rerank.cross_encoder import TextCrossEncoder
 
-                self._model = TextCrossEncoder(self.model_name)
-            except Exception as e:  # missing package, no network for the first download, ...
-                print(f"[rerank] disabled - could not load {self.model_name}: {e}", file=sys.stderr)
-                self.available = False
+                        self._model = TextCrossEncoder(self.model_name)
+                    except Exception as e:  # missing package, no network for the first download, ...
+                        print(f"[rerank] disabled - could not load {self.model_name}: {e}", file=sys.stderr)
+                        self.available = False
         return self._model is not None
 
     def warm(self) -> bool:
@@ -519,9 +522,12 @@ class KnowledgeBase:
         for start in range(0, len(orphans), 500):
             self._col.delete(ids=orphans[start : start + 500])
 
+        now_with_chunks = {c.source for c in fresh}
         reprocessed = [r for r in updated + forced if r not in failed]
-        return IngestReport([r for r in added if r not in failed], reprocessed, removed,
-                            len(current) - len(added) - len(reprocessed), len(chunks), empty, failed,
+        reprocessed += [r for r in retry if r in now_with_chunks]  # scanned PDFs that OCR could read this time
+        added_ok = [r for r in added if r not in failed]
+        unchanged = len(current) - len(added_ok) - len(reprocessed) - len(failed)
+        return IngestReport(added_ok, reprocessed, removed, unchanged, len(chunks), empty, failed,
                             embedded=len(to_embed))
 
     # -- transcriptions (PDF text written by Claude, see rag/ocr.py)

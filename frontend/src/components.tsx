@@ -102,7 +102,7 @@ export function Sidebar(props: {
             <button onClick={() => props.onSelect(c.id)} className="min-w-0 flex-1 px-3 py-2 text-left">
               <div className="truncate text-sm">{c.title}</div>
               <div className="mt-0.5 text-xs text-zinc-500">
-                {ago(c.updated_at)} · ${c.cost_usd.toFixed(c.cost_usd < 0.01 ? 4 : 2)}
+                {c.answering ? "Answering…" : <>{ago(c.updated_at)} · ${c.cost_usd.toFixed(c.cost_usd < 0.01 ? 4 : 2)}</>}
               </div>
             </button>
             <button onClick={() => props.onDelete(c.id)} aria-label={`Delete ${c.title}`}

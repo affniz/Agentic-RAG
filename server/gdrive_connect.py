@@ -144,10 +144,24 @@ class DriveConnection:
         if not client or not data.get("refresh_token"):
             raise gdrive.DriveError("Google Drive isn't connected - connect it on the Documents screen")
         key = (client[0], client[1], data["refresh_token"])
+        token = data["refresh_token"]
         with self._lock:
             if self._session is None or self._session[0] != key:
-                self._session = (key, gdrive.oauth_session(client[0], client[1], data["refresh_token"], TOKEN_URL))
+                self._session = (key, gdrive.oauth_session(client[0], client[1], token, TOKEN_URL,
+                                                           lambda e: self._sign_in_failed(token, e)))
             return self._session[1]
+
+    def _sign_in_failed(self, token: str, e: gdrive.DriveAuthError) -> None:
+        """Google turned down the saved sign-in: show it on the Documents screen. A dead refresh token
+        is forgotten, so the screen offers "Connect Google Drive" again; the chosen folder is kept."""
+        with self._lock:
+            data = self.load()
+            if data.get("refresh_token") != token:  # already replaced by a new sign-in
+                return
+            data["error"] = str(e)
+            if e.reconnect:
+                data.pop("refresh_token", None)
+            self.save(data)
 
     # ------------------------------------------------------------ OAuth flow
 
@@ -317,6 +331,14 @@ def make_router(conn: DriveConnection, env_folder: str | None, dest_dir: str,
         except gdrive.DriveError as e:
             raise HTTPException(400, str(e))
         conn.update(folder=fid, folder_name=meta.get("name") or fid, error=None)
+        return status(request)
+
+    @router.delete("/folder")
+    def unselect_folder(request: Request) -> dict[str, Any]:
+        """Stop syncing a folder. Files already synced stay in the documents folder (and the next folder
+        chosen replaces them); they can be deleted on the Documents screen like any other file."""
+        oauth_only()
+        conn.update(folder=None, folder_name=None, error=None)
         return status(request)
 
     @router.delete("/account")

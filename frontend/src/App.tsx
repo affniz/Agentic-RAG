@@ -88,71 +88,118 @@ function Workspace({ onLogout }: { onLogout?: () => void }) {
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ block: "end" }); }, [turns]);
 
+  // A chat left mid-answer keeps answering on the server: refresh the list until none is.
+  useEffect(() => {
+    if (!conversations.some((c) => c.answering)) return;
+    const t = setTimeout(refreshList, 2000);
+    return () => clearTimeout(t);
+  }, [conversations, refreshList]);
+
   const patchLast = (fn: (t: Turn) => Turn) =>
     setTurns((ts) => (ts.length ? [...ts.slice(0, -1), fn(ts[ts.length - 1])] : ts));
+
+  // The answer being streamed into this screen, if any. Opening another chat stops reading it (the
+  // server still finishes and saves the answer), so its events never land in the other chat.
+  const stream = useRef<AbortController | null>(null);
+  // The conversation on screen, for async work that finishes after the user moved on.
+  const shown = useRef<string | null>(null);
+
+  function leaveStream() {
+    stream.current?.abort();
+    stream.current = null;
+    setBusy(false);
+  }
 
   async function send(message: string) {
     setError(null);
     setBusy(true);
+    const mine = new AbortController();
+    stream.current = mine;
+    const patch = (fn: (t: Turn) => Turn) => { if (stream.current === mine) patchLast(fn); };
     setTurns((ts) => [...ts, { ...emptyAssistant(), role: "user", text: message, streaming: false }, emptyAssistant()]);
     try {
-      for await (const ev of streamChat({ message, conversation_id: activeId })) {
+      for await (const ev of streamChat({ message, conversation_id: activeId }, mine.signal)) {
+        if (stream.current !== mine) break;
         switch (ev.type) {
           case "conversation":
+            shown.current = ev.id;
             setActiveId(ev.id);
-            patchLast((t) => ({ ...t, id: ev.turn_id, model: ev.model }));
+            patch((t) => ({ ...t, id: ev.turn_id, model: ev.model }));
             refreshList();
             break;
           case "tool_call":
-            patchLast((t) => ({ ...t, steps: [...t.steps, { id: ev.id, name: ev.name, args: ev.args, status: "running", step: ev.step }] }));
+            patch((t) => ({ ...t, steps: [...t.steps, { id: ev.id, name: ev.name, args: ev.args, status: "running", step: ev.step }] }));
             break;
           case "tool_result":
-            patchLast((t) => ({
+            patch((t) => ({
               ...t,
               steps: t.steps.map((s) => (s.id === ev.id ? { ...s, status: ev.is_error ? "error" : "done", chars: ev.chars, results: ev.results, seconds: ev.seconds } : s)),
             }));
             break;
           case "model_call": {
             const { type: _, ...call } = ev;
-            patchLast((t) => ({ ...t, timings: [...(t.timings ?? []), call] }));
+            patch((t) => ({ ...t, timings: [...(t.timings ?? []), call] }));
             break;
           }
           case "text_delta":
-            patchLast((t) => ({ ...t, text: t.text + ev.text }));
+            patch((t) => ({ ...t, text: t.text + ev.text }));
             break;
           case "answer":
-            patchLast((t) => ({ ...t, text: ev.text, citations: ev.citations, stop: ev.stop }));
+            patch((t) => ({ ...t, text: ev.text, citations: ev.citations, stop: ev.stop }));
             break;
           case "usage":
-            patchLast((t) => ({ ...t, usage: ev.usage, cost_usd: ev.cost_usd }));
+            patch((t) => ({ ...t, usage: ev.usage, cost_usd: ev.cost_usd }));
             break;
           case "error":
-            patchLast((t) => ({ ...t, text: `Something went wrong: ${ev.message}`, stop: "error" }));
+            patch((t) => ({
+              ...t, text: `Something went wrong: ${ev.message}`, stop: "error",
+              steps: t.steps.map((s) => (s.status === "running" ? { ...s, status: "error" } : s)),
+            }));
             break;
           case "done":
-            patchLast((t) => ({ ...t, seconds: ev.seconds, streaming: false }));
-            refreshList();
+            patch((t) => ({ ...t, seconds: ev.seconds, streaming: false }));
             break;
         }
       }
     } catch (e) {
-      patchLast((t) => ({ ...t, text: `Request failed: ${(e as Error).message}`, stop: "error" }));
+      patch((t) => ({ ...t, text: `Request failed: ${(e as Error).message}`, stop: "error" }));
     } finally {
-      patchLast((t) => ({ ...t, streaming: false }));
-      setBusy(false);
+      if (stream.current === mine) {
+        patchLast((t) => ({ ...t, streaming: false }));
+        stream.current = null;
+        setBusy(false);
+      }
+      refreshList();
     }
   }
 
-  async function open(id: string) {
+  /** Show a conversation. One that is still answering (e.g. left mid-answer) is reloaded until it's done. */
+  async function load(id: string) {
+    const c = await api.conversation(id).catch((e) => {
+      if (shown.current === id) setError((e as Error).message);
+      return null;
+    });
+    if (!c || shown.current !== id) return;
+    setTurns(c.answering ? [...c.messages, emptyAssistant()] : c.messages);
+    setBusy(!!c.answering);
+    if (c.answering) setTimeout(() => load(id), 1500);
+    else refreshList();
+  }
+
+  function open(id: string) {
+    leaveStream();
     navigate("chat");
     setCite(null);
-    const c = await api.conversation(id);
+    setError(null);
+    shown.current = id;
     setActiveId(id);
-    setTurns(c.messages);
+    load(id);
   }
 
   function newChat() {
+    leaveStream();
     navigate("chat");
+    shown.current = null;
     setActiveId(null);
     setTurns([]);
     setCite(null);

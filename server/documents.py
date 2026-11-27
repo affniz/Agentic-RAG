@@ -142,6 +142,13 @@ def make_router(kb: KnowledgeBase, docs_dir: Path, transcriber: Callable[[], Tra
     file_info: dict[tuple[str, int, int, int], tuple[str, int | None]] = {}
     file_info_lock = threading.Lock()
 
+    def _drive_files(drive: DriveSync | None) -> set[str]:
+        """Documents (paths relative to the documents folder) that the Drive sync keeps up to date."""
+        if drive is None:
+            return set()
+        prefix = drive.dest.resolve().relative_to(root).as_posix()
+        return {f"{prefix}/{p}" for p in gdrive.synced_paths(drive.dest)}
+
     def resolve(name: str) -> Path:
         path = (docs_dir / name).resolve()
         if not path.is_relative_to(root) or path == root:
@@ -154,6 +161,7 @@ def make_router(kb: KnowledgeBase, docs_dir: Path, transcriber: Callable[[], Tra
         # still sees "running" and polls again, instead of pairing "done" with a stale list.
         ingest_state = dict(job.state)
         drive = drive_sync()
+        synced = _drive_files(drive)
         indexed = kb.indexed_files()
         indexed_at = kb.indexed_times()
         errors = kb.index_errors()
@@ -179,7 +187,7 @@ def make_router(kb: KnowledgeBase, docs_dir: Path, transcriber: Callable[[], Tra
                 status = "error"  # the last ingest tried and couldn't read it (a previous version may still be indexed)
             rows.append({"name": rel, "type": path.suffix.lower().lstrip("."), "size": stat.st_size,
                          "modified": stat.st_mtime, "indexed_at": indexed_at.get(rel), "error": errors.get(rel) if status == "error" else None, "chunks": counts.get(rel, 0), "status": status,
-                         "pages": pages, "transcribed": is_pdf and kb.has_transcription(path),
+                         "pages": pages, "transcribed": is_pdf and kb.has_transcription(path), "gdrive": rel in synced,
                          "transcribe_cost_usd": round((pages or 1) * EST_USD_PER_PAGE, 4) if is_pdf else None})
         with file_info_lock:  # keep only files that still exist, as they are now
             file_info.clear()
@@ -187,7 +195,7 @@ def make_router(kb: KnowledgeBase, docs_dir: Path, transcriber: Callable[[], Tra
         on_disk = {r["name"] for r in rows}
         rows += [{"name": rel, "type": Path(rel).suffix.lstrip("."), "size": None, "modified": None,
                   "indexed_at": indexed_at.get(rel), "error": None, "chunks": counts.get(rel, 0), "status": "deleted", "pages": None, "transcribed": False,
-                  "transcribe_cost_usd": None} for rel in sorted(indexed) if rel not in on_disk]
+                  "gdrive": False, "transcribe_cost_usd": None} for rel in sorted(indexed) if rel not in on_disk]
         return {"documents": rows, "chunks": len(kb.chunks), "ingest": ingest_state, "ocr": kb.pdf_ocr is not None,
                 "needs_ingest": any(r["status"] not in ("indexed", "empty", "error") for r in rows),
                 "gdrive": None if drive is None else {
@@ -260,6 +268,9 @@ def make_router(kb: KnowledgeBase, docs_dir: Path, transcriber: Callable[[], Tra
         path = resolve(name)
         if path.suffix.lower() not in SUPPORTED or not path.is_file():
             raise HTTPException(404, "document not found")
+        if path.relative_to(root).as_posix() in _drive_files(drive_sync()):
+            raise HTTPException(409, "this file is synced from Google Drive and would come back on the next sync - "
+                                     "delete it in Drive, or unselect the Drive folder first")
         # Delete its transcription now, not at the next ingest (which may wait behind a running one),
         # unless another file in the folder has identical contents and still uses it.
         digest = kb.indexed_files().get(name)

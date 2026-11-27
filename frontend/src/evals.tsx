@@ -178,7 +178,8 @@ function RunPanel({ evalSet, settings, models, job, onStarted }: {
     <section className={`${card} p-4`} aria-labelledby="run-heading">
       <h2 id="run-heading" className="text-sm font-semibold">Run an eval</h2>
       <p className="mt-0.5 text-sm text-zinc-500">
-        {evalSet.description || `${evalSet.questions} questions.`}{" "}
+        {evalSet.error ? <span className="text-red-700 dark:text-red-300">{evalSet.error}</span>
+          : evalSet.description || `${evalSet.questions} questions.`}{" "}
         <span className="text-zinc-400">{Object.entries(evalSet.categories).map(([c, n]) => `${c} ${n}`).join(" · ")}</span>
       </p>
 

@@ -55,6 +55,7 @@ export type ConversationSummary = {
   turns: number;
   cost_usd: number;
   model: string;
+  answering?: boolean; // a question is being answered right now (its answer isn't in `messages` yet)
 };
 
 export type AuthStatus = { required: boolean; authenticated: boolean };
@@ -112,6 +113,7 @@ export type DocumentRow = {
   status: DocStatus;
   pages: number | null;
   transcribed: boolean;
+  gdrive: boolean; // kept in sync with the chosen Google Drive folder (delete it in Drive instead)
   transcribe_cost_usd: number | null;
 };
 
@@ -156,7 +158,7 @@ export type DriveStatus = {
   dir: string; // where in the documents folder synced files go
   redirect_uri: string; // to register on the OAuth client
   last_sync: DriveSyncReport | null;
-  error: string | null; // why the last sign-in didn't work
+  error: string | null; // why the last sign-in didn't work, or why Google turned the saved one down
 };
 
 export type DocumentsResponse = {
@@ -193,7 +195,10 @@ export type DocChunks = { name: string; doc_note: string; chunks: { index: numbe
 
 export type EvalSystem = "agentic" | "agentic-v1" | "naive";
 
-export type EvalSet = { name: string; questions: number; categories: Record<string, number>; description: string; docs_found: boolean };
+export type EvalSet = {
+  name: string; questions: number; categories: Record<string, number>; description: string; docs_found: boolean;
+  error?: string; // the set's files couldn't be read
+};
 
 export type SystemSummary = {
   correct: number;

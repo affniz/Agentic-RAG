@@ -5,7 +5,8 @@
 # doesn't stop other machines (see README).
 # Published for linux/amd64 and linux/arm64 (ghcr.io/<owner>/<repo>:latest).
 # Demo mode (no API key, fake model, real search): add -e RAG_FAKE_LLM=1.
-# Your own documents: -v /path/to/docs:/app/docs
+# Documents: uploads and Drive syncs are kept in the /data volume (docs/, seeded with the samples on first
+# start); or use your own folder with -v /path/to/docs:/app/docs. See docker/entrypoint.sh.
 
 # ---- frontend
 # Built on the build machine's own platform: the output is static JS/CSS, the same for every target,
@@ -28,7 +29,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     FASTEMBED_CACHE_PATH=/home/app/.cache/fastembed \
     RAG_INDEX=/data/index \
     RAG_DATA=/data/app \
-    RAG_DOCS=/app/docs \
     RAG_EVALS=/app/evals
 
 RUN useradd --create-home --home-dir /home/app --uid 1000 app \
@@ -57,9 +57,11 @@ COPY --chown=app:app server/ server/
 COPY --chown=app:app docs/ docs/
 COPY --chown=app:app evals/ evals/
 COPY --from=frontend --chown=app:app /src/dist frontend/dist
+COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/rag-entrypoint
 
 VOLUME ["/data"]
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/ping', timeout=4)"
+ENTRYPOINT ["rag-entrypoint"]
 CMD ["python", "-m", "uvicorn", "server.app:app", "--host", "0.0.0.0", "--port", "8000"]

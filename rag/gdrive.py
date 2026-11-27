@@ -21,6 +21,7 @@ With a service account, share the Drive folder with its client_email.
 from __future__ import annotations
 
 import json
+import random
 import re
 import time
 from dataclasses import asdict, dataclass, field
@@ -44,7 +45,15 @@ EXPORTS = {
 EXTENSIONS = {".md", ".txt", ".pdf"}
 MIME_EXTENSIONS = {"application/pdf": ".pdf", "text/markdown": ".md", "text/x-markdown": ".md", "text/plain": ".txt"}
 
-_FIELDS = "nextPageToken, files(id, name, mimeType, modifiedTime, size)"
+_FIELDS = "nextPageToken, incompleteSearch, files(id, name, mimeType, modifiedTime, size)"
+# A file name's limit is 255 bytes on most file systems (ext4 in Docker counts bytes, not characters);
+# this leaves room for an extension, a " [id]" suffix and the temporary file's prefix and suffix.
+MAX_NAME_BYTES = 200
+# Transient Drive API answers worth retrying (with backoff), and how often.
+RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+RATE_LIMIT_REASONS = frozenset({"rateLimitExceeded", "userRateLimitExceeded"})  # sent with a 403
+MAX_TRIES = 5
+_sleep = time.sleep  # replaced in tests
 _FOLDER_ID = re.compile(r"^[A-Za-z0-9_-]{10,}$")
 _UNSAFE = re.compile(r"[/\\\x00-\x1f\x7f]")
 
@@ -70,6 +79,15 @@ class SyncReport:
 
 class DriveError(RuntimeError):
     pass
+
+
+class DriveAuthError(DriveError):
+    """Google turned down the saved sign-in (expired, revoked, or the OAuth client changed).
+    `reconnect`: the refresh token itself is dead, so the account has to sign in again."""
+
+    def __init__(self, message: str, reconnect: bool):
+        super().__init__(message)
+        self.reconnect = reconnect
 
 
 def folder_id(value: str) -> str:
@@ -101,10 +119,12 @@ def drive_session(credentials: str | Path | None = None) -> Session:
 
 
 class _OAuthSession:
-    """An AuthorizedSession that reports a dead refresh token (revoked, expired) as a DriveError."""
+    """An AuthorizedSession that reports a dead refresh token (revoked, expired) as a DriveAuthError,
+    and tells `on_auth_error` about it, so the app can show it where the user connects Drive."""
 
-    def __init__(self, session: Any):
+    def __init__(self, session: Any, on_auth_error: Callable[[DriveAuthError], None] | None = None):
         self._session = session
+        self._on_auth_error = on_auth_error
 
     def get(self, url: str, params: dict[str, Any] | None = None, timeout: float | None = None) -> Any:
         from google.auth.exceptions import RefreshError
@@ -112,21 +132,29 @@ class _OAuthSession:
         try:
             return self._session.get(url, params=params, timeout=timeout)
         except RefreshError as e:
+            if getattr(e, "retryable", False):  # Google had a hiccup: worth trying again later
+                raise DriveError(f"Couldn't refresh the Google sign-in, try again: {e}") from e
             code = str(e.args[0] if e.args else e).split(":")[0].strip()  # e.g. "invalid_grant"
             if code == "invalid_client":
-                raise DriveError("Google rejected the OAuth client ID or secret - disconnect, then enter them "
-                                 "again") from e
-            raise DriveError(f"Google sign-in has expired or was revoked ({code}) - connect Google Drive again") from e
+                err = DriveAuthError("Google rejected the OAuth client ID or secret - disconnect, then enter "
+                                     "them again", reconnect=False)
+            else:
+                err = DriveAuthError(f"Google sign-in has expired or was revoked ({code}) - connect Google "
+                                     "Drive again", reconnect=True)
+            if self._on_auth_error:
+                self._on_auth_error(err)
+            raise err from e
 
 
-def oauth_session(client_id: str, client_secret: str, refresh_token: str, token_uri: str) -> Session:
+def oauth_session(client_id: str, client_secret: str, refresh_token: str, token_uri: str,
+                  on_auth_error: Callable[[DriveAuthError], None] | None = None) -> Session:
     """A read-only Drive session for an account that signed in with Google (see server/gdrive_connect.py)."""
     from google.auth.transport.requests import AuthorizedSession
     from google.oauth2.credentials import Credentials
 
     creds = Credentials(None, refresh_token=refresh_token, token_uri=token_uri, client_id=client_id,
                         client_secret=client_secret, scopes=[SCOPE])
-    return _OAuthSession(AuthorizedSession(creds))
+    return _OAuthSession(AuthorizedSession(creds), on_auth_error)
 
 
 def folder_info(session: Session, folder: str) -> dict[str, Any]:
@@ -137,6 +165,12 @@ def folder_info(session: Session, folder: str) -> dict[str, Any]:
     if meta.get("mimeType") != FOLDER:
         raise DriveError(f"{meta.get('name') or fid} is not a folder ({meta.get('mimeType')})")
     return meta
+
+
+def synced_paths(dest: Path) -> set[str]:
+    """Paths (relative to `dest`, with /) of the files this connector keeps in sync there."""
+    state = _load_state(dest)
+    return {v["path"] for v in state.get("files", {}).values()} | set(state.get("claimed", []))
 
 
 def last_sync(dest: Path) -> dict[str, Any] | None:
@@ -163,12 +197,55 @@ def _check(resp: Any, what: str) -> Any:
     return resp
 
 
+def _retryable(resp: Any) -> bool:
+    if resp.status_code in RETRY_STATUSES:
+        return True
+    if resp.status_code != 403:
+        return False
+    try:
+        return resp.json()["error"]["errors"][0]["reason"] in RATE_LIMIT_REASONS
+    except Exception:
+        return False
+
+
+def _wait(attempt: int, resp: Any = None) -> float:
+    """Seconds before the next try: the server's Retry-After, else exponential backoff with jitter."""
+    try:
+        return min(float((getattr(resp, "headers", None) or {}).get("Retry-After")), 60.0)
+    except (TypeError, ValueError):
+        return min(2.0**attempt, 16.0) + random.random()
+
+
+def _get(session: Session, url: str, params: dict[str, Any], timeout: float, what: str) -> Any:
+    """GET with retries for rate limits, Drive's transient server errors and dropped connections."""
+    import requests
+
+    for attempt in range(MAX_TRIES):
+        last = attempt == MAX_TRIES - 1
+        try:
+            resp = session.get(url, params=params, timeout=timeout)
+        except (requests.ConnectionError, requests.Timeout) as e:
+            if last:
+                raise DriveError(f"Couldn't reach Google Drive for {what}: {type(e).__name__}: {e}") from e
+            _sleep(_wait(attempt))
+            continue
+        if last or not _retryable(resp):
+            return _check(resp, what)
+        _sleep(_wait(attempt, resp))
+    raise AssertionError("unreachable")
+
+
 def _get_json(session: Session, url: str, params: dict[str, Any], what: str) -> dict[str, Any]:
-    return _check(session.get(url, params=params, timeout=60), what).json()
+    return _get(session, url, params, 60, what).json()
 
 
-def _list(session: Session, q: str, what: str, limit: int | None = None) -> tuple[list[dict[str, Any]], bool]:
-    """files.list over My Drive, shared-with-me and shared drives: (files, whether `limit` cut it short)."""
+def _list(session: Session, q: str, what: str, limit: int | None = None,
+          complete: bool = False) -> tuple[list[dict[str, Any]], bool]:
+    """files.list over My Drive, shared-with-me and shared drives: (files, whether `limit` cut it short).
+
+    complete: raise DriveError if Drive says its answer may be missing items (it can, when it
+    searches several drives), rather than return a partial list. A sync needs that: a file left out
+    of the listing would be deleted locally."""
     out: list[dict[str, Any]] = []
     # corpora=allDrives: the default ("user") leaves out items that live in shared drives.
     params: dict[str, Any] = {
@@ -177,6 +254,8 @@ def _list(session: Session, q: str, what: str, limit: int | None = None) -> tupl
     }
     while True:
         page = _get_json(session, API, params, what)
+        if complete and page.get("incompleteSearch"):
+            raise DriveError(f"Google Drive returned an incomplete listing of {what}; nothing was changed - try again")
         out += page.get("files", [])
         if limit is not None and len(out) >= limit:
             return out[:limit], len(out) > limit or bool(page.get("nextPageToken"))
@@ -186,7 +265,7 @@ def _list(session: Session, q: str, what: str, limit: int | None = None) -> tupl
 
 
 def _list_children(session: Session, parent: str) -> list[dict[str, Any]]:
-    return _list(session, f"'{parent}' in parents and trashed = false", f"folder {parent}")[0]
+    return _list(session, f"'{parent}' in parents and trashed = false", f"folder {parent}", complete=True)[0]
 
 
 # ---------------------------------------------------------------- choosing a folder
@@ -260,15 +339,17 @@ def _fetch(session: Session, f: dict[str, Any]) -> bytes:
         url, params = f"{API}/{f['id']}/export", {"mimeType": EXPORTS[f["mimeType"]][0]}
     else:
         url, params = f"{API}/{f['id']}", {"alt": "media", "supportsAllDrives": "true"}
-    return _check(session.get(url, params=params, timeout=300), f"file {f['name']!r}").content
+    return _get(session, url, params, 300, f"file {f['name']!r}").content
 
 
 # ---------------------------------------------------------------- local mirror
 
 
 def _safe(name: str) -> str:
-    name = _UNSAFE.sub("_", name).strip().lstrip(".")
-    return name[:150] or "untitled"
+    name = _UNSAFE.sub("_", name).strip().lstrip(".")[:150]
+    while len(name.encode()) > MAX_NAME_BYTES:  # long names in non-Latin scripts: 3-4 bytes a character
+        name = name[:-1]
+    return name.rstrip() or "untitled"
 
 
 def _extension(f: dict[str, Any]) -> str | None:

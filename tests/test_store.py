@@ -528,3 +528,21 @@ def test_ingest_by_another_instance_is_not_undone(tmp_path):
     for kb in (first, KnowledgeBase(tmp_path / "idx", rerank=False)):
         assert [c.text for c in kb.chunks] == ["The hotel cap is 250 dollars."]
         assert [c.text for c, _ in kb.search("hotel cap", k=1, mode="vector")] == ["The hotel cap is 250 dollars."]
+
+
+
+def test_report_doesnt_count_failed_files_as_unchanged(tmp_path):
+    from pypdf import PdfWriter
+
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "a.md").write_text("# A\n\nSome text.")
+    w = PdfWriter()
+    w.add_blank_page(100, 100)
+    with open(docs / "b.pdf", "wb") as f:
+        w.write(f)
+    kb = KnowledgeBase(tmp_path / "idx", rerank=False)
+    kb.ingest(docs)
+    (docs / "b.pdf").write_bytes(b"not a pdf any more")  # an edit that can't be read
+    r = kb.ingest(docs)
+    assert list(r.failed) == ["b.pdf"] and r.updated == [] and r.unchanged == 1
